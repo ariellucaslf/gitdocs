@@ -1,0 +1,55 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String       @id @default(uuid())
+  githubId     Int          @unique
+  username     String
+  email        String?
+  avatarUrl    String?
+  accessToken  String       // GitHub Access Token
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  repositories Repository[]
+}
+
+model Repository {
+  id               String       @id @default(uuid())
+  githubRepoId     Int          @unique
+  name             String
+  fullName         String
+  owner            String
+  isActive         Boolean      @default(false)
+  autoCommitReadme Boolean      @default(false)
+  webhookId        Int?         // The registered Webhook ID on GitHub
+  userId           String
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  webhookLogs      WebhookLog[]
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+}
+
+enum LogStatus {
+  PENDING
+  SUCCESS
+  ERROR
+}
+
+model WebhookLog {
+  id                 String     @id @default(uuid())
+  repositoryId       String
+  repository         Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  prNumber           Int
+  prTitle            String
+  status             LogStatus  @default(PENDING)
+  rawDiffSize        Int        // In bytes or characters
+  errorMessage       String?    // Stored if status is ERROR
+  responseCommentUrl String?    // Link to the comment created on the PR
+  createdAt          DateTime   @default(now())
+}
