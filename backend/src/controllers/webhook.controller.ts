@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/prisma.js';
+import { prProcessorService } from '../services/prProcessor.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
 
 export class WebhookController {
@@ -57,7 +58,12 @@ export class WebhookController {
         },
       });
 
-      // Respond promptly to GitHub
+      // Dispatch async background processing
+      prProcessorService
+        .processPullRequest(log.id, dbRepo.id, pull_request, repository)
+        .catch((err) => console.error('💥 Background PR processing failed unexpectedly:', err));
+
+      // Respond promptly to GitHub with HTTP 202 Accepted
       sendSuccess(res, {
         message: 'Webhook received and queued for processing',
         logId: log.id,
