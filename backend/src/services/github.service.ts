@@ -113,6 +113,51 @@ export class GitHubService {
 
     return data.html_url;
   }
+
+  async commitFileToBranch(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    branch: string,
+    path: string,
+    content: string,
+    commitMessage: string
+  ): Promise<{ commitUrl: string }> {
+    const octokit = this.getOctokit(accessToken);
+    let sha: string | undefined;
+
+    try {
+      const existingFile = await octokit.rest.repos.getContent({
+        owner,
+        repo,
+        path,
+        ref: branch,
+      });
+
+      if ('sha' in existingFile.data) {
+        sha = existingFile.data.sha;
+      }
+    } catch (error: unknown) {
+      const err = error as { status?: number };
+      if (err?.status !== 404) {
+        console.warn(`⚠️ Warning fetching existing file ${path}:`, error);
+      }
+    }
+
+    const { data } = await octokit.rest.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path,
+      message: commitMessage,
+      content: Buffer.from(content, 'utf-8').toString('base64'),
+      branch,
+      sha,
+    });
+
+    return {
+      commitUrl: data.commit.html_url || '',
+    };
+  }
 }
 
 export const githubService = new GitHubService();
