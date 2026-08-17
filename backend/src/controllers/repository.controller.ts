@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
+import { Repository } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 import { githubService } from '../services/github.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
@@ -23,11 +24,11 @@ export class RepositoryController {
       }
 
       const ghRepos = await githubService.listUserRepositories(req.user.accessToken);
-      const dbRepos = await prisma.repository.findMany({
+      const dbRepos: Repository[] = await prisma.repository.findMany({
         where: { userId: req.user.id },
       });
 
-      const dbMap = new Map(dbRepos.map((r) => [r.githubRepoId, r]));
+      const dbMap = new Map<number, Repository>(dbRepos.map((r: Repository) => [r.githubRepoId, r]));
 
       const combined = ghRepos.map((repo) => {
         const tracked = dbMap.get(repo.id);
@@ -56,7 +57,7 @@ export class RepositoryController {
 
       const parsed = toggleRepoSchema.safeParse(req.body);
       if (!parsed.success) {
-        sendError(res, `Invalid payload: ${parsed.error.errors.map((e) => e.message).join(', ')}`, 400);
+        sendError(res, `Invalid payload: ${parsed.error.errors.map((e: z.ZodIssue) => e.message).join(', ')}`, 400);
         return;
       }
 
