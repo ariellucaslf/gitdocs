@@ -12,7 +12,10 @@
     "dev:frontend": "npm --workspace=frontend run dev",
     "build:backend": "npm --workspace=backend run build",
     "build:frontend": "npm --workspace=frontend run build",
-    "typecheck": "npm --workspace=backend run typecheck"
+    "typecheck": "npm --workspace=backend run typecheck && npm --workspace=frontend run typecheck",
+    "db:push": "npm --workspace=backend run db:push",
+    "db:generate": "npm --workspace=backend run db:generate",
+    "db:studio": "npm --workspace=backend run db:studio"
   },
   "keywords": [
     "github-bot",
@@ -20,7 +23,8 @@
     "gemini-ai",
     "nextjs",
     "express",
-    "prisma"
+    "prisma",
+    "typescript"
   ],
   "author": "",
   "license": "MIT"
