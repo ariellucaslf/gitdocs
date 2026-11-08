@@ -36,3 +36,6 @@ pnpm-debug.log*
 
 PROJECT_DETAILS.md
 .agents
+
+# Local architecture and development documentation
+/docs/
