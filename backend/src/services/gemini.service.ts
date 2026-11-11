@@ -1,40 +1,45 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { env } from '../config/env.js';
-
-export interface GeminiAnalysisResult {
-  summaryMarkdown: string;
-  suggestedReadmeUpdate: string | null;
-  hasStructuralChanges: boolean;
-}
+import {
+  AnalysisResult,
+  AiErrorCode,
+  validatedAnalysisSchema,
+} from '../types/analysis.js';
 
 export class GeminiService {
   private genAI: GoogleGenerativeAI | null = null;
-  private readonly modelName = 'gemini-1.5-flash';
-  private readonly maxDiffLength = 35000; // Defesa contra estouro de contexto e economia de tokens
+  private readonly maxDiffLength = 35000;
+  private readonly maxTitleLength = 500;
+  private readonly maxBodyLength = 8000;
 
   constructor() {
     if (env.GEMINI_API_KEY) {
       this.genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
-    } else {
-      console.warn('⚠️ GEMINI_API_KEY is not defined. AI analysis will operate in fallback mode.');
     }
   }
 
   /**
-   * Sanitiza o diff do PR removendo arquivos irrelevantes como lockfiles, binários e minificados
+   * Sanitizes diff by stripping sensitive files (secrets, keys, env) and non-code assets (locks, binaries).
    */
-  sanitizeDiff(rawDiff: string): string {
-    if (!rawDiff) return '';
+  sanitizeDiff(rawDiff: string): { cleanDiff: string; truncated: boolean } {
+    if (!rawDiff) return { cleanDiff: '', truncated: false };
 
     const lines = rawDiff.split('\n');
     const sanitizedLines: string[] = [];
     let isIgnoredFile = false;
 
-    // Extensões e padrões que não agregam valor à análise de código com IA
     const ignoredPatterns = [
       'package-lock.json',
       'pnpm-lock.yaml',
       'yarn.lock',
+      '.env',
+      '.env.',
+      '.pem',
+      '.key',
+      '.cert',
+      '.pfx',
+      'id_rsa',
+      'credentials.json',
       '.min.js',
       '.min.css',
       '.map',
@@ -44,11 +49,13 @@ export class GeminiService {
       '.svg',
       '.ico',
       '.pdf',
+      '.wasm',
     ];
 
     for (const line of lines) {
       if (line.startsWith('diff --git')) {
-        isIgnoredFile = ignoredPatterns.some((pattern) => line.includes(pattern));
+        const lineLower = line.toLowerCase();
+        isIgnoredFile = ignoredPatterns.some((pattern) => lineLower.includes(pattern));
       }
 
       if (!isIgnoredFile) {
@@ -56,110 +63,191 @@ export class GeminiService {
       }
     }
 
-    let result = sanitizedLines.join('\n');
+    let cleanDiff = sanitizedLines.join('\n').trim();
+    let truncated = false;
 
-    // Truncamento defensivo caso o diff ainda seja massivo
-    if (result.length > this.maxDiffLength) {
-      result = `${result.slice(0, this.maxDiffLength)}\n\n[... Diff truncated for token optimization ...]`;
+    if (cleanDiff.length > this.maxDiffLength) {
+      cleanDiff = cleanDiff.slice(0, this.maxDiffLength);
+      truncated = true;
     }
 
-    return result;
+    return { cleanDiff, truncated };
   }
 
   /**
-   * Envia o diff sanitizado ao Gemini e retorna o resumo estruturado e possíveis atualizações de README
+   * Classifies error types into standard domain codes with explicit retryability.
+   */
+  classifyError(error: unknown): { code: AiErrorCode; retryable: boolean; message: string } {
+    const message = error instanceof Error ? error.message : String(error);
+    const msgLower = message.toLowerCase();
+
+    if (
+      msgLower.includes('api key') ||
+      msgLower.includes('401') ||
+      msgLower.includes('unauthorized') ||
+      msgLower.includes('forbidden')
+    ) {
+      return { code: 'AUTHENTICATION', retryable: false, message };
+    }
+
+    if (
+      msgLower.includes('rate limit') ||
+      msgLower.includes('429') ||
+      msgLower.includes('resource_exhausted') ||
+      msgLower.includes('quota')
+    ) {
+      return { code: 'RATE_LIMIT', retryable: true, message };
+    }
+
+    if (
+      msgLower.includes('timeout') ||
+      msgLower.includes('deadline') ||
+      msgLower.includes('aborted')
+    ) {
+      return { code: 'TIMEOUT', retryable: true, message };
+    }
+
+    if (
+      msgLower.includes('503') ||
+      msgLower.includes('unavailable') ||
+      msgLower.includes('overloaded')
+    ) {
+      return { code: 'PROVIDER_UNAVAILABLE', retryable: true, message };
+    }
+
+    return { code: 'PROVIDER_UNAVAILABLE', retryable: true, message };
+  }
+
+  /**
+   * Analyzes PR diff and returns a discriminated AnalysisResult union.
    */
   async analyzePullRequest(
     prTitle: string,
     prBody: string | null,
     rawDiff: string
-  ): Promise<GeminiAnalysisResult> {
-    const cleanDiff = this.sanitizeDiff(rawDiff);
+  ): Promise<AnalysisResult> {
+    const { cleanDiff, truncated } = this.sanitizeDiff(rawDiff);
 
     if (!cleanDiff.trim()) {
       return {
-        summaryMarkdown: '### 🤖 GitDocs AI Review\n\n*No reviewable code changes detected in this Pull Request.*',
-        suggestedReadmeUpdate: null,
-        hasStructuralChanges: false,
+        kind: 'skipped',
+        reason: 'EMPTY_DIFF',
+      };
+    }
+
+    if (!env.GEMINI_API_KEY) {
+      return {
+        kind: 'failed',
+        code: 'CONFIGURATION',
+        message: 'GEMINI_API_KEY is not configured on the server',
+        retryable: false,
       };
     }
 
     if (!this.genAI) {
-      return {
-        summaryMarkdown: `### 🤖 GitDocs AI Review\n\n> ⚠️ **AI analysis skipped:** \`GEMINI_API_KEY\` is not configured on the server.`,
-        suggestedReadmeUpdate: null,
-        hasStructuralChanges: false,
-      };
+      this.genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
     }
+
+    const title = (prTitle || 'Untitled PR').slice(0, this.maxTitleLength);
+    const description = (prBody || 'No description provided.').slice(0, this.maxBodyLength);
 
     const prompt = `
 You are GitDocs AI, an expert Senior Software Engineer and Open Source Documentation Maintainer.
-Analyze the following GitHub Pull Request diff and provide a comprehensive, structured code review and documentation suggestion.
+Analyze the following Pull Request diff and provide a structured JSON analysis strictly adhering to the schema below.
 
-Pull Request Title: "${prTitle}"
-Pull Request Description: "${prBody || 'No description provided.'}"
+JSON Schema:
+{
+  "summary": "High-level summary of the PR changes and design decisions (markdown allowed)",
+  "categories": ["feat" | "fix" | "refactor" | "docs" | "test" | "chore" | "security" | "performance" | "breaking_change"],
+  "findings": [
+    {
+      "file": "path/to/file.ts",
+      "lineRange": "10-25",
+      "category": "feat" | "fix" | "refactor" | "docs" | "test" | "chore" | "security" | "performance" | "breaking_change",
+      "severity": "info" | "warning" | "critical",
+      "title": "Short title describing finding",
+      "message": "Detailed technical analysis of the finding",
+      "evidence": "Concrete snippet or evidence found in diff"
+    }
+  ],
+  "suggestedDocUpdate": {
+    "title": "Title of suggested documentation update",
+    "targetFile": "README.md",
+    "description": "Explanation of why README needs updating",
+    "proposedContent": "Markdown snippet to add or update",
+    "evidence": "Evidence from diff that justifies the doc change"
+  } | null
+}
+
+Pull Request Title: "${title}"
+Pull Request Description: "${description}"
 
 Diff content:
 \`\`\`diff
 ${cleanDiff}
 \`\`\`
 
-Instructions:
-1. Provide a clean, developer-friendly Markdown review report.
-2. Group the code changes into clear categories:
-   - 🚀 **New Features / Enhancements**
-   - 🐛 **Bug Fixes**
-   - ♻️ **Refactoring & Code Quality**
-   - ⚠️ **Breaking Changes / Critical Notices** (if any)
-3. Include a bulleted checklist of key modifications.
-4. Assess if the changes introduce new features, environment variables, commands, or architectural changes that MUST be documented in the repository's \`README.md\`.
-5. If README updates are needed:
-   - Return a specific section labeled \`---README_UPDATE_START---\` followed ONLY by the updated or suggested markdown block, and end with \`---README_UPDATE_END---\`.
-   - If NO README updates are needed, omit this block entirely.
-
-Format your entire response cleanly in Markdown.
+Return ONLY raw JSON, with no markdown code fence and no extra commentary.
 `;
 
     try {
-      const model = this.genAI.getGenerativeModel({ model: this.modelName });
+      const model = this.genAI.getGenerativeModel({
+        model: env.GEMINI_MODEL,
+        generationConfig: {
+          responseMimeType: 'application/json',
+        },
+      });
+
       const response = await model.generateContent(prompt);
       const text = response.response.text();
 
-      let summaryMarkdown = text;
-      let suggestedReadmeUpdate: string | null = null;
-      let hasStructuralChanges = false;
-
-      // Extract README suggestion block if present
-      const readmeStartTag = '---README_UPDATE_START---';
-      const readmeEndTag = '---README_UPDATE_END---';
-
-      if (text.includes(readmeStartTag) && text.includes(readmeEndTag)) {
-        const parts = text.split(readmeStartTag);
-        summaryMarkdown = parts[0]?.trim() || '';
-        const readmeContent = parts[1]?.split(readmeEndTag)[0]?.trim();
-
-        if (readmeContent) {
-          suggestedReadmeUpdate = readmeContent;
-          hasStructuralChanges = true;
-        }
+      let parsed: unknown;
+      try {
+        const cleanedText = text
+          .trim()
+          .replace(/^```json\s*/, '')
+          .replace(/```\s*$/, '')
+          .trim();
+        parsed = JSON.parse(cleanedText);
+      } catch (jsonErr) {
+        return {
+          kind: 'failed',
+          code: 'INVALID_OUTPUT',
+          message: `Model response was not valid JSON: ${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)}`,
+          retryable: false,
+        };
       }
 
-      // Add GitDocs branding header if not present
-      if (!summaryMarkdown.startsWith('## 🤖 GitDocs AI Review')) {
-        summaryMarkdown = `## 🤖 GitDocs AI Review\n\n${summaryMarkdown}`;
+      const validation = validatedAnalysisSchema.safeParse(parsed);
+      if (!validation.success) {
+        return {
+          kind: 'failed',
+          code: 'INVALID_OUTPUT',
+          message: `Model JSON output did not match expected schema: ${validation.error.message}`,
+          retryable: false,
+        };
       }
 
-      return {
-        summaryMarkdown,
-        suggestedReadmeUpdate,
-        hasStructuralChanges,
+      const usageMetadata = response.response.usageMetadata;
+      const usage = {
+        model: env.GEMINI_MODEL,
+        inputTokens: usageMetadata?.promptTokenCount,
+        outputTokens: usageMetadata?.candidatesTokenCount,
       };
-    } catch (error) {
-      console.error('❌ GeminiService analysis error:', error);
+
       return {
-        summaryMarkdown: `## 🤖 GitDocs AI Review\n\n> ⚠️ *Failed to process AI analysis due to an internal error:* ${error instanceof Error ? error.message : 'Unknown error'}`,
-        suggestedReadmeUpdate: null,
-        hasStructuralChanges: false,
+        kind: 'analyzed',
+        data: validation.data,
+        usage,
+        truncated,
+      };
+    } catch (err: unknown) {
+      const classified = this.classifyError(err);
+      return {
+        kind: 'failed',
+        code: classified.code,
+        message: classified.message,
+        retryable: classified.retryable,
       };
     }
   }

@@ -1,6 +1,7 @@
 import { prisma } from '../config/prisma.js';
 import { githubService } from './github.service.js';
 import { geminiService } from './gemini.service.js';
+import { formatReviewComment } from '../utils/commentFormatter.js';
 
 export interface PullRequestPayloadData {
   number: number;
@@ -69,27 +70,59 @@ export class PRProcessorService {
         rawDiff
       );
 
-      // 4. Post AI review comment on the Pull Request
+      // Handle skipped analysis (e.g. diff was empty after sanitization)
+      if (analysis.kind === 'skipped') {
+        console.log(`⏭️ [PRProcessor] PR #${prNumber} analysis skipped (reason: ${analysis.reason}).`);
+        await prisma.webhookLog.update({
+          where: { id: logId },
+          data: {
+            status: 'SUCCESS',
+            errorMessage: `Skipped: ${analysis.reason}`,
+          },
+        });
+        return;
+      }
+
+      // Handle AI failure explicitly: must NEVER be marked as SUCCESS (ADR 0005, V09)
+      if (analysis.kind === 'failed') {
+        console.error(`❌ [PRProcessor] PR #${prNumber} AI analysis failed: [${analysis.code}] ${analysis.message}`);
+        await prisma.webhookLog.update({
+          where: { id: logId },
+          data: {
+            status: 'ERROR',
+            errorMessage: `AI_${analysis.code}: ${analysis.message}`,
+          },
+        });
+        return;
+      }
+
+      // 4. Deterministically format review comment from validated structured schema
+      const commentMarkdown = formatReviewComment({
+        analysis: analysis.data,
+        usage: analysis.usage,
+        truncated: analysis.truncated,
+      });
+
+      // 5. Post review comment on the Pull Request
       const commentUrl = await githubService.postPullRequestComment(
         accessToken,
         owner,
         repoName,
         prNumber,
-        analysis.summaryMarkdown
+        commentMarkdown
       );
 
       console.log(`💬 [PRProcessor] Comment posted to PR #${prNumber}: ${commentUrl}`);
 
-      // 5. Direct README autocommit is suspended to prevent data loss (ADR 0003).
-      // Suggested documentation updates must go through contextual proposal and human review.
-      if (dbRepo.autoCommitReadme && analysis.suggestedReadmeUpdate) {
+      // 6. Direct README autocommit remains suspended to prevent data loss (ADR 0003)
+      if (dbRepo.autoCommitReadme && analysis.data.suggestedDocUpdate) {
         console.warn(
           `🛡️ [PRProcessor] Direct README autocommit blocked for PR #${prNumber} (repository: ${repository.full_name}). ` +
-            `Automated writes without human approval are disabled to prevent data loss.`
+            `Documentation proposals require human review before applying.`
         );
       }
 
-      // 6. Update WebhookLog to SUCCESS
+      // 7. Update WebhookLog to SUCCESS only when analysis and comment succeed
       await prisma.webhookLog.update({
         where: { id: logId },
         data: {
