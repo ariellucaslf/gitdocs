@@ -1,3 +1,4 @@
+import { logSafeError } from '../utils/logger.js';
 import { Request, Response } from 'express';
 import { z } from 'zod';
 import { Repository } from '@prisma/client';
@@ -6,6 +7,8 @@ import { githubService } from '../services/github.service.js';
 import { resolveUserAccessToken } from '../services/crypto.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
 import { env } from '../config/env.js';
+import { repositoryProvisioningService } from '../services/repositoryProvisioning.service.js';
+import { HttpError } from '../utils/errors.js';
 
 const toggleRepoSchema = z.object({
   githubRepoId: z.number().int().positive(),
@@ -24,6 +27,9 @@ export class RepositoryController {
         return;
       }
 
+      const query = z.object({ page: z.coerce.number().int().min(1).max(100000).default(1), limit: z.coerce.number().int().min(1).max(100).default(50),
+        search: z.string().max(200).default(''), filter: z.enum(['all', 'active', 'inactive']).default('all') }).safeParse(req.query);
+      if (!query.success) { sendError(res, 'Invalid repository query', 400); return; }
       const accessToken = resolveUserAccessToken(req.user);
       const ghRepos = await githubService.listUserRepositories(accessToken);
       const dbRepos: Repository[] = await prisma.repository.findMany({
@@ -46,10 +52,8 @@ export class RepositoryController {
         };
       });
 
-      const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : '';
-      const filter = req.query.filter as 'all' | 'active' | 'inactive' | undefined;
-      const page = req.query.page ? Math.max(1, Number(req.query.page)) : 1;
-      const limit = req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50;
+      const { page, limit, filter } = query.data;
+      const search = query.data.search.toLowerCase();
       const skip = (page - 1) * limit;
 
       let filtered = combined;
@@ -70,8 +74,10 @@ export class RepositoryController {
 
       // Real aggregates calculation (ADR 0001, V23)
       const aggregates = {
+        pendingProposals: await prisma.docProposal.count({ where: { repository: { userId: req.user.id }, status: 'PENDING_APPROVAL' } }),
+        aiModel: env.GEMINI_MODEL || 'Not configured',
         totalRepositories: ghRepos.length,
-        activeRepositories: dbRepos.filter((r) => r.isActive).length,
+        activeRepositories: combined.filter((r) => r.isActive).length,
         errorRepositories: dbRepos.filter((r) => r.provisioningState === 'ERROR').length,
       };
 
@@ -86,7 +92,7 @@ export class RepositoryController {
         aggregates,
       });
     } catch (error) {
-      console.error('❌ RepositoryController.list error:', error);
+      logSafeError('❌ RepositoryController.list error:', error);
       sendError(res, 'Failed to fetch repositories', 500);
     }
   };
@@ -102,7 +108,7 @@ export class RepositoryController {
       if (!parsed.success) {
         sendError(
           res,
-          `Invalid payload: ${parsed.error.errors.map((e: z.ZodIssue) => e.message).join(', ')}`,
+          `Invalid payload: ${parsed.error.issues.map((e: z.ZodIssue) => e.message).join(', ')}`,
           400
         );
         return;
@@ -128,7 +134,7 @@ export class RepositoryController {
       try {
         ghRepo = await githubService.getRepositoryById(accessToken, githubRepoId);
       } catch (ghError) {
-        console.error(`Failed to verify repository ${githubRepoId} on GitHub:`, ghError);
+        logSafeError(`Failed to verify repository ${githubRepoId} on GitHub:`, ghError);
         sendError(res, 'Repository not found on GitHub or inaccessible', 404);
         return;
       }
@@ -143,131 +149,16 @@ export class RepositoryController {
         return;
       }
 
-      const canonicalName = ghRepo.name;
-      const canonicalFullName = ghRepo.fullName;
-      const canonicalOwner = ghRepo.owner;
-
-      // 3. Activation Flow
-      if (isActive) {
-        const webhookUrl = env.GITHUB_WEBHOOK_URL;
-        if (!webhookUrl) {
-          sendError(res, 'Server configuration error: GITHUB_WEBHOOK_URL is not configured', 500);
-          return;
-        }
-
-        // Reserve intent in database first (PROVISIONING)
-        const reservedRepo = await prisma.repository.upsert({
-          where: { githubRepoId },
-          update: {
-            desiredActive: true,
-            provisioningState: 'PROVISIONING',
-            lastErrorCode: null,
-            name: canonicalName,
-            fullName: canonicalFullName,
-            owner: canonicalOwner,
-          },
-          create: {
-            githubRepoId,
-            name: canonicalName,
-            fullName: canonicalFullName,
-            owner: canonicalOwner,
-            desiredActive: true,
-            isActive: false, // Never mark ACTIVE until webhook is confirmed on GitHub
-            provisioningState: 'PROVISIONING',
-            userId: req.user.id,
-          },
-        });
-
-        // Provision webhook on GitHub
-        try {
-          const webhookId = await githubService.createRepositoryWebhook(
-            accessToken,
-            canonicalOwner,
-            canonicalName,
-            webhookUrl
-          );
-
-          // Transition to ACTIVE upon confirmation
-          const activeRepo = await prisma.repository.update({
-            where: { id: reservedRepo.id },
-            data: {
-              isActive: true,
-              desiredActive: true,
-              provisioningState: 'ACTIVE',
-              webhookId,
-              lastErrorCode: null,
-            },
-          });
-
-          sendSuccess(res, activeRepo);
-          return;
-        } catch (webhookError: unknown) {
-          console.error(`Failed to provision webhook on GitHub for ${canonicalFullName}:`, webhookError);
-          const errorCode =
-            webhookError instanceof Error ? webhookError.message : 'WEBHOOK_PROVISIONING_FAILED';
-
-          // V06: State transitions to ERROR, retains desiredActive and webhookId if any, but isActive stays false
-          const errorRepo = await prisma.repository.update({
-            where: { id: reservedRepo.id },
-            data: {
-              isActive: false,
-              desiredActive: true,
-              provisioningState: 'ERROR',
-              lastErrorCode: errorCode,
-            },
-          });
-
-          sendSuccess(res, errorRepo);
-          return;
-        }
+      if (isActive && (!env.GITHUB_WEBHOOK_URL || !env.GITHUB_WEBHOOK_SECRET)) {
+        sendError(res, 'Webhook configuration is missing on the server', 503); return;
       }
-
-      // 4. Deactivation Flow
-      if (!existing) {
-        sendError(res, 'Repository is not active or monitored', 404);
-        return;
-      }
-
-      // Pause processing immediately
-      await prisma.repository.update({
-        where: { id: existing.id },
-        data: {
-          desiredActive: false,
-          isActive: false,
-        },
+      const result = await repositoryProvisioningService.request(req.user.id, githubRepoId, isActive, {
+        name: ghRepo.name, fullName: ghRepo.fullName, owner: ghRepo.owner,
       });
-
-      let deletionSucceeded = true;
-      if (existing.webhookId) {
-        try {
-          await githubService.deleteRepositoryWebhook(
-            accessToken,
-            canonicalOwner,
-            canonicalName,
-            existing.webhookId
-          );
-        } catch (delError: unknown) {
-          console.error(`Failed to delete webhook on GitHub for ${canonicalFullName}:`, delError);
-          deletionSucceeded = false;
-        }
-      }
-
-      // V07: If deletion failed, retain webhookId and mark ERROR so retry/reconciliation is possible
-      const deactivatedRepo = await prisma.repository.update({
-        where: { id: existing.id },
-        data: {
-          isActive: false,
-          desiredActive: false,
-          provisioningState: deletionSucceeded ? 'DISABLED' : 'ERROR',
-          webhookId: deletionSucceeded ? null : existing.webhookId,
-          lastErrorCode: deletionSucceeded ? null : 'WEBHOOK_DELETION_FAILED',
-        },
-      });
-
-      sendSuccess(res, deactivatedRepo);
+      sendSuccess(res, result);
     } catch (error) {
-      console.error('❌ RepositoryController.toggle error:', error);
-      sendError(res, 'Failed to update repository settings', 500);
+      logSafeError('❌ RepositoryController.toggle error:', error);
+      sendError(res, error instanceof HttpError ? error.code : 'Failed to update repository settings', error instanceof HttpError ? error.statusCode : 500);
     }
   };
 }
