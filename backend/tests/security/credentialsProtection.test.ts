@@ -11,6 +11,7 @@ import { userA } from '../fixtures/index.js';
 
 vi.mock('../../src/config/prisma.js', () => ({
   prisma: {
+    docProposal: { count: vi.fn().mockResolvedValue(0) },
     user: {
       findFirst: vi.fn(),
       upsert: vi.fn(),
@@ -210,5 +211,15 @@ describe('Server-Side Credential Protection & BFF Assertions (ADR 0002, V21, V22
       expect(res.status).toBe(401);
       expect(res.body.error).toContain('User credentials have been revoked');
     });
+  });
+});
+
+
+describe('Malformed signed assertion lifetime', () => {
+  it.each([undefined, 'tomorrow', null])('rejects non-numeric expiration %s even with a valid signature', exp => {
+    const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ sub: userA.id, ghId: userA.githubId, username: userA.username, iss: 'gitdocs-bff', aud: 'gitdocs-api', iat: Math.floor(Date.now()/1000), exp })).toString('base64url');
+    const signature = crypto.createHmac('sha256', process.env.INTERNAL_AUTH_SECRET!).update(`${header}.${payload}`).digest('base64url');
+    expect(() => cryptoService.verifyInternalAssertion(`${header}.${payload}.${signature}`)).toThrow('expired');
   });
 });
