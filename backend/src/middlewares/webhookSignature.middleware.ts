@@ -22,10 +22,14 @@ export const webhookSignatureMiddleware = (
       return;
     }
 
-    // Use rawBody buffer if available, otherwise serialize req.body
-    const payload = req.rawBody ? req.rawBody : Buffer.from(JSON.stringify(req.body));
+    // Rejeitar corpo sem bytes originais em vez de reconstruí-lo para verificar assinatura (ADR 0002)
+    if (!req.rawBody) {
+      sendError(res, 'Raw request payload missing for signature validation', 400);
+      return;
+    }
+
     const hmac = crypto.createHmac('sha256', env.GITHUB_WEBHOOK_SECRET);
-    const digest = `sha256=${hmac.update(payload).digest('hex')}`;
+    const digest = `sha256=${hmac.update(req.rawBody).digest('hex')}`;
 
     const sigBuffer = Buffer.from(signature);
     const digestBuffer = Buffer.from(digest);

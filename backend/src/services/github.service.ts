@@ -38,12 +38,68 @@ export class GitHubService {
     }));
   }
 
+  async getRepositoryById(
+    accessToken: string,
+    repoId: number
+  ): Promise<{
+    id: number;
+    name: string;
+    fullName: string;
+    owner: string;
+    permissions?: {
+      admin?: boolean;
+      push?: boolean;
+      pull?: boolean;
+    };
+  }> {
+    const octokit = this.getOctokit(accessToken);
+    const { data } = await octokit.request('GET /repositories/:id', { id: repoId });
+    return {
+      id: data.id,
+      name: data.name,
+      fullName: data.full_name,
+      owner: data.owner.login,
+      permissions: data.permissions,
+    };
+  }
+
+  async findRepositoryWebhook(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    webhookUrl: string
+  ): Promise<number | null> {
+    try {
+      const octokit = this.getOctokit(accessToken);
+      const { data: hooks } = await octokit.rest.repos.listWebhooks({
+        owner,
+        repo,
+        per_page: 100,
+      });
+
+      const matchingHook = hooks.find(
+        (h) => h.config && h.config.url && h.config.url.toLowerCase() === webhookUrl.toLowerCase()
+      );
+
+      return matchingHook ? matchingHook.id : null;
+    } catch (error) {
+      console.warn(`Could not list webhooks for ${owner}/${repo}:`, error);
+      return null;
+    }
+  }
+
   async createRepositoryWebhook(
     accessToken: string,
     owner: string,
     repo: string,
     webhookUrl: string
   ): Promise<number> {
+    // Reconcile: Check if webhook already exists before attempting creation
+    const existingHookId = await this.findRepositoryWebhook(accessToken, owner, repo, webhookUrl);
+    if (existingHookId) {
+      return existingHookId;
+    }
+
     const octokit = this.getOctokit(accessToken);
     const { data } = await octokit.rest.repos.createWebhook({
       owner,
@@ -69,11 +125,19 @@ export class GitHubService {
     webhookId: number
   ): Promise<void> {
     const octokit = this.getOctokit(accessToken);
-    await octokit.rest.repos.deleteWebhook({
-      owner,
-      repo,
-      hook_id: webhookId,
-    });
+    try {
+      await octokit.rest.repos.deleteWebhook({
+        owner,
+        repo,
+        hook_id: webhookId,
+      });
+    } catch (error: unknown) {
+      // If hook was already deleted on GitHub (404), consider it reconciled
+      if (error && typeof error === 'object' && 'status' in error && error.status === 404) {
+        return;
+      }
+      throw error;
+    }
   }
 
   async getPullRequestDiff(
