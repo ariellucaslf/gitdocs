@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import { DocProposals } from './DocProposals';
 import { RepositoryItem, toggleRepository } from '@/lib/api';
 import {
   Search,
@@ -17,11 +18,10 @@ import {
 
 interface RepositoryListProps {
   repositories: RepositoryItem[];
-  token?: string;
   onRefresh: () => void;
 }
 
-export function RepositoryList({ repositories, token, onRefresh }: RepositoryListProps) {
+export function RepositoryList({ repositories, onRefresh }: RepositoryListProps) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [loadingRepoId, setLoadingRepoId] = useState<number | null>(null);
@@ -67,7 +67,7 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search your GitHub repositories..."
+            placeholder="Search repositories on this page..."
             className="w-full bg-surface-elevated/80 border border-surface-border/80 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500/60 focus:ring-1 focus:ring-emerald-500/30 transition-all"
           />
         </div>
@@ -196,7 +196,7 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
                         AI PR Review
                       </span>
                       <span className="text-[11px] text-slate-400">
-                        {repo.isActive ? 'Webhook monitoring active' : 'Monitoring paused'}
+                        {repo.provisioningState === 'ERROR' ? 'Webhook needs attention' : repo.provisioningState === 'PROVISIONING' ? 'Configuring webhook…' : repo.isActive ? 'Webhook monitoring active' : 'Monitoring paused'}
                       </span>
                     </div>
 
@@ -234,6 +234,11 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
                     </div>
                   )}
 
+                  {repo.provisioningState === 'ERROR' && <div className="text-xs text-rose-300" role="alert">
+                    {repo.lastErrorCode || 'Webhook configuration failed'}
+                    <button className="underline ml-2" disabled={isLoading} onClick={() => handleToggle(repo, repo.desiredActive ?? false)}>Retry</button>
+                  </div>}
+                  {repo.dbId && <DocProposals repositoryId={repo.dbId} />}
                   {isLoading && (
                     <div className="flex items-center gap-1.5 text-[11px] text-emerald-400 justify-end pt-1">
                       <Loader2 className="w-3 h-3 animate-spin" /> Updating GitHub...
