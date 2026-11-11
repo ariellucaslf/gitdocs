@@ -18,15 +18,21 @@ export const authOptions: NextAuthOptions = {
       if (account && account.access_token) {
         token.accessToken = account.access_token;
       }
-      if (profile && 'login' in profile) {
-        token.username = profile.login as string;
+      if (profile && typeof profile === 'object') {
+        if ('login' in profile) {
+          token.username = profile.login as string;
+        }
+        if ('id' in profile) {
+          token.githubId = profile.id as number;
+        }
       }
       return token;
     },
     async session({ session, token }) {
-      session.accessToken = token.accessToken as string | undefined;
+      // NOTE (ADR 0002, V21): accessToken is strictly kept on server, NEVER exposed to client session
       if (session.user) {
         session.user.username = token.username as string | undefined;
+        session.user.id = token.sub;
       }
       return session;
     },
