@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import crypto from 'node:crypto';
 import { prisma } from '../config/prisma.js';
 import { prProcessorService } from '../services/prProcessor.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
@@ -7,6 +8,35 @@ export class WebhookController {
   handle = async (req: Request, res: Response): Promise<void> => {
     try {
       const event = req.headers['x-github-event'] as string;
+      const deliveryId = (req.headers['x-github-delivery'] as string) || crypto.randomUUID();
+      const payloadBuffer = req.rawBody || Buffer.from(JSON.stringify(req.body));
+      const payloadDigest = crypto.createHash('sha256').update(payloadBuffer).digest('hex');
+
+      // V11 & V12: Deduplicate or reject tampered deliveries
+      const existingDelivery = await prisma.webhookDelivery.findUnique({
+        where: { deliveryId },
+      });
+
+      if (existingDelivery) {
+        if (existingDelivery.payloadDigest !== payloadDigest) {
+          console.error(`🚨 [WebhookAdmission] Tampered delivery attempt for ${deliveryId}`);
+          sendError(res, 'Tampered webhook delivery detected', 409);
+          return;
+        }
+
+        console.log(`ℹ️ [WebhookAdmission] Duplicate delivery ${deliveryId} acknowledged idempotently.`);
+        sendSuccess(
+          res,
+          {
+            received: true,
+            duplicate: true,
+            deliveryId,
+            status: existingDelivery.admissionStatus,
+          },
+          200
+        );
+        return;
+      }
 
       // Handle ping event when webhook is registered
       if (event === 'ping') {
@@ -54,28 +84,76 @@ export class WebhookController {
         return;
       }
 
-      // Initial Webhook Log creation (PENDING)
-      const log = await prisma.webhookLog.create({
-        data: {
+      const headSha = pull_request.head?.sha || 'unknown-sha';
+      const baseRef = pull_request.base?.ref || 'main';
+
+      // Atomic enrollment of ProcessingRun and WebhookDelivery (ADR 0004, V11, V13)
+      const run = await prisma.processingRun.upsert({
+        where: {
+          repositoryId_prNumber_headSha: {
+            repositoryId: dbRepo.id,
+            prNumber: pull_request.number,
+            headSha,
+          },
+        },
+        update: {},
+        create: {
           repositoryId: dbRepo.id,
           prNumber: pull_request.number,
           prTitle: pull_request.title || 'Untitled PR',
-          status: 'PENDING',
-          rawDiffSize: 0,
+          headSha,
+          baseRef,
+          status: 'QUEUED',
+          attemptCount: 0,
+          maxAttempts: 3,
         },
       });
 
-      // Dispatch async background processing
+      await prisma.webhookDelivery.create({
+        data: {
+          deliveryId,
+          repositoryId: dbRepo.id,
+          event: 'pull_request',
+          action,
+          headSha,
+          payloadDigest,
+          admissionStatus: 'ADMITTED',
+          processingRunId: run.id,
+        },
+      });
+
+      // Synchronize legacy WebhookLog for backward compatibility
+      await prisma.webhookLog
+        .create({
+          data: {
+            id: run.id,
+            repositoryId: dbRepo.id,
+            prNumber: pull_request.number,
+            prTitle: pull_request.title || 'Untitled PR',
+            status: 'PENDING',
+            rawDiffSize: 0,
+          },
+        })
+        .catch(() => {
+          // Ignored if mapped log already exists
+        });
+
+      // Dispatch processing
       prProcessorService
-        .processPullRequest(log.id, dbRepo.id, pull_request, repository)
+        .processPullRequest(run.id, dbRepo.id, pull_request, repository)
         .catch((err) => console.error('💥 Background PR processing failed unexpectedly:', err));
 
-      // Respond promptly to GitHub with HTTP 202 Accepted
-      sendSuccess(res, {
-        message: 'Webhook received and queued for processing',
-        logId: log.id,
-        status: 'PENDING',
-      }, 202);
+      // Respond promptly to GitHub with HTTP 202 Accepted (Job safely persisted)
+      sendSuccess(
+        res,
+        {
+          message: 'Webhook received and admitted to persistent queue',
+          deliveryId,
+          runId: run.id,
+          status: run.status,
+        },
+        202
+      );
     } catch (error) {
       console.error('❌ WebhookController.handle error:', error);
       sendError(res, 'Internal server error while processing webhook', 500);

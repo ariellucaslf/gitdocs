@@ -178,6 +178,54 @@ export class GitHubService {
     return data.html_url;
   }
 
+  async findPullRequestComment(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    marker: string
+  ): Promise<string | null> {
+    try {
+      const octokit = this.getOctokit(accessToken);
+      const { data: comments } = await octokit.rest.issues.listComments({
+        owner,
+        repo,
+        issue_number: pullNumber,
+        per_page: 100,
+      });
+
+      const matching = comments.find((c) => c.body && c.body.includes(marker));
+      return matching ? matching.html_url : null;
+    } catch (err) {
+      console.warn(`Could not list comments for PR #${pullNumber}:`, err);
+      return null;
+    }
+  }
+
+  async getPullRequestHeadSha(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    pullNumber: number
+  ): Promise<{ headSha: string; state: string } | null> {
+    try {
+      const octokit = this.getOctokit(accessToken);
+      const { data: pr } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+      });
+
+      return {
+        headSha: pr.head.sha,
+        state: pr.state,
+      };
+    } catch (err) {
+      console.warn(`Could not fetch PR #${pullNumber} head SHA:`, err);
+      return null;
+    }
+  }
+
   async commitFileToBranch(
     accessToken: string,
     owner: string,
