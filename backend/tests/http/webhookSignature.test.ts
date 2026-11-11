@@ -11,6 +11,7 @@ import { prisma } from '../../src/config/prisma.js';
 // Mock prisma for HTTP unit tests so we don't hit a live database
 vi.mock('../../src/config/prisma.js', () => ({
   prisma: {
+    $transaction: vi.fn(async (fn: any) => fn(prisma)),
     repository: {
       findUnique: vi.fn(),
     },
@@ -58,6 +59,7 @@ describe('Webhook Signature Middleware (HMAC verification)', () => {
       .post('/api/webhooks')
       .set('Content-Type', 'application/json')
       .set('x-github-event', 'pull_request')
+      .set('x-github-delivery', 'signature-test')
       .send(rawBody);
 
     expect(res.status).toBe(401);
@@ -74,6 +76,7 @@ describe('Webhook Signature Middleware (HMAC verification)', () => {
       .post('/api/webhooks')
       .set('Content-Type', 'application/json')
       .set('x-github-event', 'pull_request')
+      .set('x-github-delivery', 'signature-test')
       .set('x-hub-signature-256', invalidSignature)
       .send(rawBody);
 
@@ -91,6 +94,7 @@ describe('Webhook Signature Middleware (HMAC verification)', () => {
       .post('/api/webhooks')
       .set('Content-Type', 'application/json')
       .set('x-github-event', 'pull_request')
+      .set('x-github-delivery', 'signature-test')
       .set('x-hub-signature-256', signatureForDifferentBody)
       .send(rawBody);
 
@@ -123,6 +127,7 @@ describe('Webhook Signature Middleware (HMAC verification)', () => {
       .post('/api/webhooks')
       .set('Content-Type', 'application/json')
       .set('x-github-event', 'pull_request')
+      .set('x-github-delivery', 'signature-test')
       .set('x-hub-signature-256', validSignature)
       .send(rawBody);
 
@@ -130,7 +135,7 @@ describe('Webhook Signature Middleware (HMAC verification)', () => {
     expect(res.body).toMatchObject({
       success: true,
       data: {
-        message: 'Repository is inactive, skipped processing',
+        reason: 'MONITORING_DISABLED',
       },
     });
   });

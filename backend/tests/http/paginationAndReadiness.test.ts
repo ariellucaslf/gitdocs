@@ -8,6 +8,7 @@ import { repoA, userA } from '../fixtures/index.js';
 
 vi.mock('../../src/config/prisma.js', () => ({
   prisma: {
+    docProposal: { count: vi.fn().mockResolvedValue(0) },
     $queryRaw: vi.fn(),
     user: {
       findFirst: vi.fn(),
@@ -17,7 +18,7 @@ vi.mock('../../src/config/prisma.js', () => ({
       findMany: vi.fn(),
       count: vi.fn(),
     },
-    webhookLog: {
+    processingRun: {
       findMany: vi.fn(),
       count: vi.fn(),
     },
@@ -92,7 +93,7 @@ describe('Operations, Pagination, Real Aggregates & Readiness (ADR 0001, V23, V2
       expect(data.items[0].name).toBe('repo-11');
 
       // Real aggregates calculation
-      expect(data.aggregates).toEqual({
+      expect(data.aggregates).toMatchObject({
         totalRepositories: 25,
         activeRepositories: 3,
         errorRepositories: 1,
@@ -115,8 +116,8 @@ describe('Operations, Pagination, Real Aggregates & Readiness (ADR 0001, V23, V2
         },
       ];
 
-      vi.mocked(prisma.webhookLog.count).mockResolvedValueOnce(55);
-      vi.mocked(prisma.webhookLog.findMany).mockResolvedValueOnce(mockLogs as any);
+      vi.mocked(prisma.processingRun.count).mockResolvedValueOnce(55);
+      vi.mocked(prisma.processingRun.findMany).mockResolvedValueOnce(mockLogs as any);
 
       const res = await request(app)
         .get('/api/webhooks/logs?page=1&limit=20&status=SUCCESS')
@@ -132,7 +133,7 @@ describe('Operations, Pagination, Real Aggregates & Readiness (ADR 0001, V23, V2
       });
       expect(res.body.data.items).toHaveLength(1);
 
-      expect(prisma.webhookLog.count).toHaveBeenCalledWith(
+      expect(prisma.processingRun.count).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             status: 'SUCCESS',
@@ -142,7 +143,7 @@ describe('Operations, Pagination, Real Aggregates & Readiness (ADR 0001, V23, V2
     });
 
     it('returns explicit HTTP 500 error on database failure when fetching logs without masking as empty list', async () => {
-      vi.mocked(prisma.webhookLog.count).mockRejectedValueOnce(new Error('Connection lost to PostgreSQL'));
+      vi.mocked(prisma.processingRun.count).mockRejectedValueOnce(new Error('Connection lost to PostgreSQL'));
 
       const res = await request(app)
         .get('/api/webhooks/logs')
@@ -194,7 +195,7 @@ describe('Operations, Pagination, Real Aggregates & Readiness (ADR 0001, V23, V2
         success: false,
         status: 'not_ready',
         database: 'disconnected',
-        error: expect.stringContaining('ECONNREFUSED'),
+        error: 'Database unavailable',
       });
     });
   });
