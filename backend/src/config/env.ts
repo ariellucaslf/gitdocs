@@ -13,6 +13,8 @@ const envSchema = z
     GITHUB_WEBHOOK_URL: z.string().default(''),
     CORS_ORIGIN: z.string().default('http://localhost:3000'),
     GEMINI_API_KEY: z.string().default(''),
+    GEMINI_MODEL: z.string().default('gemini-2.5-flash'),
+    GEMINI_TIMEOUT_MS: z.coerce.number().default(60000),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   })
   .refine(
