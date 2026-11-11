@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { getToken } from 'next-auth/jwt';
 import crypto from 'node:crypto';
-import { authOptions } from '@/lib/auth';
+import { authOptions } from '../../../../lib/auth';
 
 const INTERNAL_SECRET =
-  process.env.INTERNAL_AUTH_SECRET || 'gitdocs-internal-auth-secret-change-in-production';
+  process.env.INTERNAL_AUTH_SECRET || '';
 const BACKEND_INTERNAL_URL =
   process.env.BACKEND_INTERNAL_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
@@ -17,7 +17,7 @@ async function generateAssertion(req: NextRequest) {
     secret: process.env.NEXTAUTH_SECRET,
   });
 
-  if (!token) {
+  if (!token || token.identityVersion !== 2 || typeof token.sub !== 'string' || !Number.isInteger(token.githubId) || !token.username) {
     return null;
   }
 
@@ -26,12 +26,12 @@ async function generateAssertion(req: NextRequest) {
 
   const header = { alg: 'HS256', typ: 'JWT' };
   const payload = {
-    sub: token.sub || 'unknown-user',
+    sub: token.sub,
     iss: 'gitdocs-bff',
     aud: 'gitdocs-api',
     iat: now,
     exp: now + ttl,
-    ghId: Number(token.githubId || 0),
+    ghId: token.githubId,
     username: (token.username as string) || 'user',
   };
 
@@ -47,8 +47,24 @@ async function generateAssertion(req: NextRequest) {
 
 async function handleProxy(
   req: NextRequest,
-  { params }: { params: { path: string[] } }
+  { params: promisedParams }: { params: Promise<{ path: string[] }> }
 ) {
+  const params = await promisedParams;
+  if (INTERNAL_SECRET.length < 32) {
+    return NextResponse.json({ success: false, error: 'Server authentication is not configured' }, { status: 503 });
+  }
+  const path = params.path.join('/');
+  const allowed = (req.method === 'GET' && /^(repositories|auth\/me|webhooks\/logs|proposals\/[^/]+|repositories\/[^/]+\/proposals)$/.test(path))
+    || (req.method === 'POST' && /^(repositories\/toggle|proposals\/[^/]+\/(approve|reject))$/.test(path));
+  if (!allowed || params.path.some(segment => !/^[a-zA-Z0-9_-]+$/.test(segment))) {
+    return NextResponse.json({ success: false, error: 'Route not found' }, { status: 404 });
+  }
+  if (req.method !== 'GET') {
+    const expectedOrigin = new URL(process.env.NEXTAUTH_URL || req.url).origin;
+    if (req.headers.get('origin') !== expectedOrigin || !req.headers.get('content-type')?.startsWith('application/json')) {
+      return NextResponse.json({ success: false, error: 'Invalid request origin or content type' }, { status: 403 });
+    }
+  }
   const session = await getServerSession(authOptions);
   if (!session || !session.user) {
     return NextResponse.json(
@@ -76,7 +92,7 @@ async function handleProxy(
   };
 
   let body: string | undefined;
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
+  if (req.method !== 'GET') {
     body = await req.text();
   }
 
@@ -86,6 +102,8 @@ async function handleProxy(
       headers,
       body,
       cache: 'no-store',
+      redirect: 'error',
+      signal: AbortSignal.timeout(30000),
     });
 
     const data = await backendRes.json();
