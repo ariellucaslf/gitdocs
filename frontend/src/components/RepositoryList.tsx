@@ -17,7 +17,7 @@ import {
 
 interface RepositoryListProps {
   repositories: RepositoryItem[];
-  token: string;
+  token?: string;
   onRefresh: () => void;
 }
 
@@ -43,7 +43,7 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
     try {
       setLoadingRepoId(repo.id);
 
-      await toggleRepository(token, {
+      await toggleRepository({
         githubRepoId: repo.id,
         isActive: value,
       });

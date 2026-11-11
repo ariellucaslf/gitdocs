@@ -25,13 +25,13 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
-    if (!session?.accessToken) return;
+    if (!session?.user) return;
 
     try {
       setError(null);
       const [reposData, logsData] = await Promise.all([
-        fetchRepositories(session.accessToken),
-        fetchWebhookLogs(session.accessToken).catch(() => []),
+        fetchRepositories(),
+        fetchWebhookLogs().catch(() => []),
       ]);
 
       setRepositories(reposData);
@@ -42,15 +42,15 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, [session?.accessToken]);
+  }, [session?.user]);
 
   useEffect(() => {
-    if (session?.accessToken) {
+    if (session?.user) {
       loadData();
     } else if (status === 'unauthenticated') {
       setLoading(false);
     }
-  }, [session?.accessToken, status, loadData]);
+  }, [session?.user, status, loadData]);
 
   // Loading Session State
   if (status === 'loading' || (status === 'authenticated' && loading)) {
@@ -96,7 +96,6 @@ export default function DashboardPage() {
         {activeTab === 'repositories' ? (
           <RepositoryList
             repositories={repositories}
-            token={session.accessToken || ''}
             onRefresh={loadData}
           />
         ) : (
