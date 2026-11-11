@@ -19,20 +19,30 @@ model User {
   repositories Repository[]
 }
 
+enum ProvisioningState {
+  DISABLED
+  PROVISIONING
+  ACTIVE
+  ERROR
+}
+
 model Repository {
-  id               String       @id @default(uuid())
-  githubRepoId     Int          @unique
-  name             String
-  fullName         String
-  owner            String
-  isActive         Boolean      @default(false)
-  autoCommitReadme Boolean      @default(false)
-  webhookId        Int?         // The registered Webhook ID on GitHub
-  userId           String
-  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  webhookLogs      WebhookLog[]
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  id                String            @id @default(uuid())
+  githubRepoId      Int               @unique
+  name              String
+  fullName          String
+  owner             String
+  isActive          Boolean           @default(false)
+  desiredActive     Boolean           @default(false)
+  provisioningState ProvisioningState @default(DISABLED)
+  lastErrorCode     String?
+  autoCommitReadme  Boolean           @default(false)
+  webhookId         Int?              // The registered Webhook ID on GitHub
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  webhookLogs       WebhookLog[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 }
 
 enum LogStatus {
