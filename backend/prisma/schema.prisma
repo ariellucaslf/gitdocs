@@ -42,6 +42,8 @@ model Repository {
   desiredActive     Boolean           @default(false)
   provisioningState ProvisioningState @default(DISABLED)
   lastErrorCode     String?
+  provisioningLeaseUntil DateTime?
+  provisioningVersion Int @default(0)
   autoCommitReadme  Boolean           @default(false)
   webhookId         Int?              // The registered Webhook ID on GitHub
   userId            String
@@ -105,6 +107,9 @@ model ProcessingRun {
   availableAt     DateTime          @default(now())
   leaseOwner      String?
   leaseUntil      DateTime?
+  leaseVersion    Int               @default(0)
+  analysisResult  Json?
+  commentBody     String?
   lastErrorCode   String?
   rawDiffSize     Int?
   commentUrl      String?
@@ -115,6 +120,7 @@ model ProcessingRun {
 
   @@unique([repositoryId, prNumber, headSha])
   @@index([status, availableAt])
+  @@index([status, leaseUntil])
 }
 
 model ProcessingStep {
@@ -170,6 +176,7 @@ enum CommitIntentStatus {
 model DocProposal {
   id               String         @id @default(uuid())
   repositoryId     String
+  runId            String?        @unique
   repository       Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
   prNumber         Int
   headSha          String
@@ -207,6 +214,7 @@ model CommitIntent {
   expectedContentHash String             // SHA-256 of patched content
   status              CommitIntentStatus @default(PENDING)
   appliedCommitSha    String?
+  preparedCommitSha   String?
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
 
