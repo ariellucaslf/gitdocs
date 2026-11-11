@@ -2,6 +2,7 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { mainRouter } from './routes/index.js';
 import { sendSuccess, sendError } from './utils/response.js';
+import { prisma } from './config/prisma.js';
 import { env } from './config/env.js';
 
 const app: Express = express();
@@ -24,13 +25,44 @@ app.use(
   })
 );
 
-// Healthcheck Route
+// Healthcheck Routes (ADR 0001, V24)
 app.get('/health', (_req: Request, res: Response) => {
   return sendSuccess(res, {
     status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'gitdocs-backend',
   });
+});
+
+app.get('/health/liveness', (_req: Request, res: Response) => {
+  return sendSuccess(res, {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    service: 'gitdocs-backend',
+  });
+});
+
+app.get('/health/readiness', async (_req: Request, res: Response) => {
+  try {
+    // Validate live database connectivity
+    await prisma.$queryRaw`SELECT 1`;
+
+    return sendSuccess(res, {
+      status: 'ready',
+      database: 'connected',
+      timestamp: new Date().toISOString(),
+      service: 'gitdocs-backend',
+    });
+  } catch (dbError: unknown) {
+    const errorMsg = dbError instanceof Error ? dbError.message : 'Database unreachable';
+    return res.status(503).json({
+      success: false,
+      status: 'not_ready',
+      database: 'disconnected',
+      error: errorMsg,
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // Centralized API Routes
