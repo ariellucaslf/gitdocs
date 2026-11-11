@@ -1,286 +1,110 @@
+import { logger } from '../utils/logger.js';
 import { Request, Response } from 'express';
 import crypto from 'node:crypto';
+import { Prisma } from '@prisma/client';
+import { z } from 'zod';
 import { prisma } from '../config/prisma.js';
-import { prProcessorService } from '../services/prProcessor.service.js';
+import { githubService } from '../services/github.service.js';
+import { resolveUserAccessToken } from '../services/crypto.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
+
+const eventSchema = z.object({
+  action: z.string().min(1),
+  repository: z.object({ id: z.number().int().positive() }),
+  pull_request: z.object({
+    number: z.number().int().positive(), title: z.string().max(1000),
+    head: z.object({ sha: z.string().regex(/^[a-f0-9]{40}$/) }),
+    base: z.object({ ref: z.string().min(1).max(255) }),
+  }),
+});
+const paginationSchema = z.object({
+  page: z.coerce.number().int().min(1).max(100000).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  status: z.enum(['QUEUED', 'RUNNING', 'RETRY_WAIT', 'SUCCESS', 'PARTIAL_SUCCESS', 'ERROR', 'SKIPPED', 'SUPERSEDED']).optional(),
+});
 
 export class WebhookController {
   handle = async (req: Request, res: Response): Promise<void> => {
+    const deliveryId = req.get('x-github-delivery');
+    const event = req.get('x-github-event');
+    if (!deliveryId || deliveryId.length > 200 || !event || !req.rawBody) {
+      sendError(res, 'Missing delivery ID, event or original payload', 400); return;
+    }
+    const payloadDigest = crypto.createHash('sha256').update(req.rawBody).digest('hex');
+    const acknowledge = (delivery: { payloadDigest: string; admissionStatus: string; processingRunId?: string | null }) => {
+      if (delivery.payloadDigest !== payloadDigest) { sendError(res, 'Tampered webhook delivery detected', 409); return; }
+      sendSuccess(res, { received: true, duplicate: true, deliveryId, status: delivery.admissionStatus, runId: delivery.processingRunId });
+    };
     try {
-      const event = req.headers['x-github-event'] as string;
-      const deliveryId = (req.headers['x-github-delivery'] as string) || crypto.randomUUID();
-      const payloadBuffer = req.rawBody || Buffer.from(JSON.stringify(req.body));
-      const payloadDigest = crypto.createHash('sha256').update(payloadBuffer).digest('hex');
-
-      // V11 & V12: Deduplicate or reject tampered deliveries
-      const existingDelivery = await prisma.webhookDelivery.findUnique({
-        where: { deliveryId },
-      });
-
-      if (existingDelivery) {
-        if (existingDelivery.payloadDigest !== payloadDigest) {
-          console.error(`🚨 [WebhookAdmission] Tampered delivery attempt for ${deliveryId}`);
-          sendError(res, 'Tampered webhook delivery detected', 409);
-          return;
-        }
-
-        console.log(`ℹ️ [WebhookAdmission] Duplicate delivery ${deliveryId} acknowledged idempotently.`);
-        sendSuccess(
-          res,
-          {
-            received: true,
-            duplicate: true,
-            deliveryId,
-            status: existingDelivery.admissionStatus,
-          },
-          200
-        );
-        return;
-      }
-
-      // Handle ping event when webhook is registered
-      if (event === 'ping') {
-        console.log('🏓 GitHub Ping Webhook received');
-        sendSuccess(res, { message: 'Pong! Webhook registered successfully.' });
-        return;
-      }
-
-      if (event !== 'pull_request') {
-        sendSuccess(res, { message: `Event ${event} ignored. Only 'pull_request' is handled.` });
-        return;
-      }
-
-      const { action, pull_request, repository } = req.body;
-
-      if (
-        !repository ||
-        !pull_request ||
-        typeof repository.id !== 'number' ||
-        repository.id <= 0 ||
-        typeof pull_request.number !== 'number' ||
-        pull_request.number <= 0
-      ) {
-        sendError(res, 'Invalid webhook payload structure', 400);
-        return;
-      }
-
-      console.log(`📥 PR Event received: ${action} on ${repository.full_name} (#${pull_request.number})`);
-
-      // Check if repository is active and confirmed in our database
-      const dbRepo = await prisma.repository.findUnique({
-        where: { githubRepoId: repository.id },
-      });
-
-      if (!dbRepo || !dbRepo.isActive || !dbRepo.desiredActive || dbRepo.provisioningState !== 'ACTIVE') {
-        console.log(`⏭️ Repository ${repository.full_name} is not monitored or inactive.`);
-        sendSuccess(res, { message: 'Repository is inactive, skipped processing' });
-        return;
-      }
-
-      // Allowed PR actions
-      const triggerActions = ['opened', 'synchronize', 'reopened'];
-      if (!triggerActions.includes(action)) {
-        sendSuccess(res, { message: `PR action '${action}' ignored` });
-        return;
-      }
-
-      const headSha = pull_request.head?.sha || 'unknown-sha';
-      const baseRef = pull_request.base?.ref || 'main';
-
-      // V20: Check if head commit was produced by an automated documentation proposal (self-loop prevention)
-      const matchingIntent = await prisma.commitIntent.findFirst({
-        where: {
-          repositoryId: dbRepo.id,
-          prNumber: pull_request.number,
-          OR: [
-            { appliedCommitSha: headSha },
-            {
-              status: 'PENDING',
-              expectedParentSha: pull_request.before || undefined,
-            },
-          ],
-        },
-        include: {
-          proposal: true,
-        },
-      });
-
-      if (matchingIntent) {
-        console.log(
-          `ℹ️ [WebhookAdmission] Detected self-generated documentation commit ${headSha} from proposal ${matchingIntent.proposalId}. Skipping analysis to prevent infinite loops.`
-        );
-
-        // If intent was still pending (webhook arrived before API call finished), reconcile it
-        if (matchingIntent.status === 'PENDING') {
-          await prisma.commitIntent.update({
-            where: { id: matchingIntent.id },
-            data: {
-              status: 'CONFIRMED',
-              appliedCommitSha: headSha,
-            },
+      const existing = await prisma.webhookDelivery.findUnique({ where: { deliveryId } });
+      if (existing) { acknowledge(existing); return; }
+      if (event !== 'pull_request') { sendSuccess(res, { message: event === 'ping' ? 'Pong!' : 'Event ignored' }); return; }
+      const parsed = eventSchema.safeParse(req.body);
+      if (!parsed.success) { sendError(res, 'Invalid webhook payload structure', 400); return; }
+      const { action, pull_request: pr, repository } = parsed.data;
+      const repo = await prisma.repository.findUnique({ where: { githubRepoId: repository.id }, include: { user: true } });
+      if (!repo) { sendSuccess(res, { message: 'Repository is inactive, skipped processing' }); return; }
+      let reason: string | null = null;
+      if (!repo.isActive || !repo.desiredActive || repo.provisioningState !== 'ACTIVE') reason = 'MONITORING_DISABLED';
+      if (!['opened', 'synchronize', 'reopened'].includes(action)) reason = 'ACTION_IGNORED';
+      if (!reason) {
+        const intent = await prisma.commitIntent.findFirst({
+          where: { repositoryId: repo.id, prNumber: pr.number, status: { in: ['PENDING', 'CONFIRMED'] },
+            OR: [{ appliedCommitSha: pr.head.sha }, { preparedCommitSha: pr.head.sha }] },
+        });
+        if (intent && await githubService.verifyDocCommit(resolveUserAccessToken(repo.user), repo.owner, repo.name, pr.head.sha, intent)) {
+          await prisma.$transaction(async tx => {
+            await tx.commitIntent.update({ where: { id: intent.id }, data: { status: 'CONFIRMED', appliedCommitSha: pr.head.sha } });
+            await tx.docProposal.update({ where: { id: intent.proposalId }, data: { status: 'APPLIED', commitSha: pr.head.sha,
+              commitUrl: `https://github.com/${repo.fullName}/commit/${pr.head.sha}` } });
+            await tx.webhookDelivery.create({ data: { deliveryId, repositoryId: repo.id, event, action, headSha: pr.head.sha,
+              payloadDigest, admissionStatus: 'SKIPPED_SELF_COMMIT', admissionReason: intent.id } });
           });
-
-          await prisma.docProposal.update({
-            where: { id: matchingIntent.proposalId },
-            data: {
-              status: 'APPLIED',
-              commitSha: headSha,
-            },
-          });
+          sendSuccess(res, { received: true, skipped: true, headSha: pr.head.sha }); return;
         }
-
-        // Record delivery as admitted and skipped
-        await prisma.webhookDelivery.create({
-          data: {
-            deliveryId,
-            repositoryId: dbRepo.id,
-            event,
-            action,
-            headSha,
-            payloadDigest,
-            admissionStatus: 'SKIPPED_SELF_COMMIT',
-            admissionReason: `Generated by proposal ${matchingIntent.proposalId}`,
-          },
-        });
-
-        sendSuccess(res, {
-          received: true,
-          skipped: true,
-          reason: 'Self-generated documentation commit ignored to prevent loop',
-          headSha,
-        });
-        return;
       }
-
-      // Atomic enrollment of ProcessingRun and WebhookDelivery (ADR 0004, V11, V13)
-      const run = await prisma.processingRun.upsert({
-        where: {
-          repositoryId_prNumber_headSha: {
-            repositoryId: dbRepo.id,
-            prNumber: pull_request.number,
-            headSha,
-          },
-        },
-        update: {},
-        create: {
-          repositoryId: dbRepo.id,
-          prNumber: pull_request.number,
-          prTitle: pull_request.title || 'Untitled PR',
-          headSha,
-          baseRef,
-          status: 'QUEUED',
-          attemptCount: 0,
-          maxAttempts: 3,
-        },
-      });
-
-      await prisma.webhookDelivery.create({
-        data: {
-          deliveryId,
-          repositoryId: dbRepo.id,
-          event: 'pull_request',
-          action,
-          headSha,
-          payloadDigest,
-          admissionStatus: 'ADMITTED',
-          processingRunId: run.id,
-        },
-      });
-
-      // Synchronize legacy WebhookLog for backward compatibility
-      await prisma.webhookLog
-        .create({
-          data: {
-            id: run.id,
-            repositoryId: dbRepo.id,
-            prNumber: pull_request.number,
-            prTitle: pull_request.title || 'Untitled PR',
-            status: 'PENDING',
-            rawDiffSize: 0,
-          },
-        })
-        .catch(() => {
-          // Ignored if mapped log already exists
+      const run = await prisma.$transaction(async tx => {
+        const processingRun = reason ? null : await tx.processingRun.upsert({
+          where: { repositoryId_prNumber_headSha: { repositoryId: repo.id, prNumber: pr.number, headSha: pr.head.sha } },
+          update: {}, create: { repositoryId: repo.id, prNumber: pr.number, prTitle: pr.title, headSha: pr.head.sha, baseRef: pr.base.ref },
         });
-
-      // Dispatch processing
-      prProcessorService
-        .processPullRequest(run.id, dbRepo.id, pull_request, repository)
-        .catch((err) => console.error('💥 Background PR processing failed unexpectedly:', err));
-
-      // Respond promptly to GitHub with HTTP 202 Accepted (Job safely persisted)
-      sendSuccess(
-        res,
-        {
-          message: 'Webhook received and admitted to persistent queue',
-          deliveryId,
-          runId: run.id,
-          status: run.status,
-        },
-        202
-      );
+        await tx.webhookDelivery.create({ data: { deliveryId, repositoryId: repo.id, event, action, headSha: pr.head.sha,
+          payloadDigest, admissionStatus: reason ? 'SKIPPED' : 'ADMITTED', admissionReason: reason, processingRunId: processingRun?.id } });
+        return processingRun;
+      });
+      logger.info('Webhook admitted', { deliveryId, runId: run?.id, repositoryId: repo.id, reason });
+      // Only the persistent worker executes a run. The receiver has no fire-and-forget path.
+      sendSuccess(res, { received: true, deliveryId, runId: run?.id, status: run?.status ?? 'SKIPPED', reason }, run ? 202 : 200);
     } catch (error) {
-      console.error('❌ WebhookController.handle error:', error);
-      sendError(res, 'Internal server error while processing webhook', 500);
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const existing = await prisma.webhookDelivery.findUnique({ where: { deliveryId } }).catch(() => null);
+        if (existing) { acknowledge(existing); return; }
+      }
+      sendError(res, 'Webhook admission unavailable; retry delivery', 503);
     }
   };
 
   listLogs = async (req: Request, res: Response): Promise<void> => {
+    if (!req.user) { sendError(res, 'Unauthorized', 401); return; }
+    const query = paginationSchema.safeParse(req.query);
+    if (!query.success) { sendError(res, 'Invalid pagination or status', 400); return; }
+    const { page, limit, status } = query.data;
+    const owner = { repository: { userId: req.user.id } };
     try {
-      if (!req.user) {
-        sendError(res, 'Unauthorized', 401);
-        return;
-      }
-
-      const page = req.query.page ? Math.max(1, Number(req.query.page)) : 1;
-      const limit = req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50;
-      const skip = (page - 1) * limit;
-
-      const whereClause: any = {
-        repository: {
-          userId: req.user.id,
-        },
-      };
-
-      if (req.query.status && typeof req.query.status === 'string') {
-        whereClause.status = req.query.status;
-      }
-
-      const [total, logs] = await Promise.all([
-        prisma.webhookLog.count({ where: whereClause }),
-        prisma.webhookLog.findMany({
-          where: whereClause,
-          orderBy: { createdAt: 'desc' },
-          skip,
-          take: limit,
-          include: {
-            repository: {
-              select: {
-                name: true,
-                fullName: true,
-                owner: true,
-              },
-            },
-          },
-        }),
+      const where = { ...owner, ...(status ? { status } : {}) };
+      const [total, runs, success, errors, all] = await Promise.all([
+        prisma.processingRun.count({ where }),
+        prisma.processingRun.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: (page - 1) * limit, take: limit,
+          include: { repository: { select: { name: true, fullName: true, owner: true } }, steps: true } }),
+        prisma.processingRun.count({ where: { ...owner, status: 'SUCCESS' } }),
+        prisma.processingRun.count({ where: { ...owner, status: { in: ['ERROR', 'PARTIAL_SUCCESS'] } } }),
+        prisma.processingRun.count({ where: owner }),
       ]);
-
-      const totalPages = Math.ceil(total / limit) || 1;
-
-      sendSuccess(res, {
-        items: logs,
-        pagination: {
-          page,
-          limit,
-          total,
-          totalPages,
-        },
-      });
-    } catch (error) {
-      console.error('❌ WebhookController.listLogs error:', error);
-      sendError(res, 'Failed to fetch webhook logs', 500);
-    }
+      const items = runs.map(run => ({ ...run, rawDiffSize: run.rawDiffSize ?? 0, errorMessage: run.lastErrorCode,
+        responseCommentUrl: run.commentUrl, analysisResult: undefined, commentBody: undefined }));
+      sendSuccess(res, { items, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+        aggregates: { successfulReviews: success, failedReviews: errors, totalRuns: all } });
+    } catch { sendError(res, 'Failed to fetch webhook logs', 500); }
   };
 }
-
 export const webhookController = new WebhookController();

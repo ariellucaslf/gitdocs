@@ -1,5 +1,8 @@
+import { logSafeError } from '../utils/logger.js';
 import crypto from 'node:crypto';
 import { queueService } from './queue.service.js';
+import { repositoryProvisioningService } from '../services/repositoryProvisioning.service.js';
+import { prisma } from '../config/prisma.js';
 import { jobProcessorService } from './processor.service.js';
 
 export class BackgroundWorker {
@@ -29,13 +32,14 @@ export class BackgroundWorker {
 
     while (this.isRunning) {
       try {
+        await repositoryProvisioningService.reconcileNext();
         const handled = await this.processNextJob();
         if (!handled) {
           // No job available, wait poll interval
           await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
         }
       } catch (err) {
-        console.error(`💥 [Worker ${this.workerId}] Loop error:`, err);
+        logSafeError(`💥 [Worker ${this.workerId}] Loop error:`, err);
         await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
       }
     }
@@ -53,14 +57,14 @@ if (process.argv[1]?.endsWith('worker.ts') || process.argv[1]?.endsWith('worker.
 
   const shutdown = () => {
     worker.stop();
-    process.exit(0);
+    // Let the active job finish and release its lease. A crash is recovered by lease expiry.
   };
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  worker.start().catch((err) => {
-    console.error('Fatal worker error:', err);
+  worker.start().finally(() => prisma.$disconnect()).catch((err) => {
+    logSafeError('Fatal worker error:', err);
     process.exit(1);
   });
 }
