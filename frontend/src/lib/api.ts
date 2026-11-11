@@ -56,12 +56,12 @@ export async function fetchRepositories(_token?: string): Promise<RepositoryItem
     throw new Error(`Failed to fetch repositories: ${res.statusText}`);
   }
 
-  const json: ApiResponse<RepositoryItem[]> = await res.json();
+  const json = await res.json();
   if (!json.success) {
     throw new Error(json.error || 'Failed to fetch repositories');
   }
 
-  return json.data;
+  return Array.isArray(json.data) ? json.data : json.data.items || [];
 }
 
 export async function toggleRepository(
@@ -97,10 +97,10 @@ export async function fetchWebhookLogs(_token?: string): Promise<WebhookLogItem[
     throw new Error(`Failed to fetch logs: ${res.statusText}`);
   }
 
-  const json: ApiResponse<WebhookLogItem[]> = await res.json();
+  const json = await res.json();
   if (!json.success) {
     throw new Error(json.error || 'Failed to fetch logs');
   }
 
-  return json.data;
+  return Array.isArray(json.data) ? json.data : json.data.items || [];
 }
