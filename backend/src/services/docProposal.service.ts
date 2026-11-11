@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { prisma } from '../config/prisma.js';
 import { githubService } from './github.service.js';
 import { docPatchService, PatchOperation } from './docPatch.service.js';
+import { resolveUserAccessToken } from './crypto.service.js';
 
 export interface CreateProposalInput {
   repositoryId: string;
@@ -116,7 +117,7 @@ export class DocProposalService {
       throw error;
     }
 
-    const accessToken = proposal.repository.user.accessToken;
+    const accessToken = resolveUserAccessToken(proposal.repository.user);
     const owner = proposal.repository.owner;
     const repo = proposal.repository.name;
 

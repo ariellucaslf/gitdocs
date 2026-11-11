@@ -1,6 +1,7 @@
 import { prisma } from '../config/prisma.js';
 import { githubService } from './github.service.js';
 import { geminiService } from './gemini.service.js';
+import { resolveUserAccessToken } from './crypto.service.js';
 import { formatReviewComment } from '../utils/commentFormatter.js';
 
 export interface PullRequestPayloadData {
@@ -44,11 +45,11 @@ export class PRProcessorService {
         include: { user: true },
       });
 
-      if (!dbRepo || !dbRepo.user || !dbRepo.user.accessToken) {
+      if (!dbRepo || !dbRepo.user) {
         throw new Error(`Repository or user authentication not found for repository ID: ${repositoryId}`);
       }
 
-      const accessToken = dbRepo.user.accessToken;
+      const accessToken = resolveUserAccessToken(dbRepo.user);
       const owner = repository.owner.login;
       const repoName = repository.name;
       const prNumber = pullRequest.number;
