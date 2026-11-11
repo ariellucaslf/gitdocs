@@ -4,5 +4,7 @@ process.env['DATABASE_URL'] =
   'postgresql://gitdocs_user:gitdocs_password@localhost:5432/gitdocs_test?schema=public';
 process.env['GITHUB_WEBHOOK_SECRET'] =
   process.env['GITHUB_WEBHOOK_SECRET'] || 'test-webhook-secret';
+process.env['GITHUB_WEBHOOK_URL'] =
+  process.env['GITHUB_WEBHOOK_URL'] || 'https://webhook.example.com/api/webhooks';
 process.env['GEMINI_API_KEY'] =
   process.env['GEMINI_API_KEY'] || 'test-gemini-key';
