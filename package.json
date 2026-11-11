@@ -7,12 +7,21 @@
     "backend",
     "frontend"
   ],
+  "engines": {
+    "node": ">=20.17.0 <25.0.0",
+    "npm": ">=10.0.0"
+  },
   "scripts": {
     "dev:backend": "npm --workspace=backend run dev",
     "dev:frontend": "npm --workspace=frontend run dev",
     "build:backend": "npm --workspace=backend run build",
     "build:frontend": "npm --workspace=frontend run build",
     "typecheck": "npm --workspace=backend run typecheck && npm --workspace=frontend run typecheck",
+    "test": "npm --workspace=backend run test",
+    "test:integration": "npm --workspace=backend run test:integration",
+    "db:migrate": "npm --workspace=backend run db:migrate",
+    "db:migrate:deploy": "npm --workspace=backend run db:migrate:deploy",
+    "db:migrate:status": "npm --workspace=backend run db:migrate:status",
     "db:push": "npm --workspace=backend run db:push",
     "db:generate": "npm --workspace=backend run db:generate",
     "db:studio": "npm --workspace=backend run db:studio"
