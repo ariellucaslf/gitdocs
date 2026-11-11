@@ -41,8 +41,89 @@ model Repository {
   userId            String
   user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   webhookLogs       WebhookLog[]
+  webhookDeliveries WebhookDelivery[]
+  processingRuns    ProcessingRun[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  RETRY_WAIT
+  SUCCESS
+  PARTIAL_SUCCESS
+  ERROR
+  SKIPPED
+  SUPERSEDED
+}
+
+enum StepStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  SKIPPED
+  ERROR
+}
+
+model WebhookDelivery {
+  id              String         @id @default(uuid())
+  deliveryId      String         @unique
+  repositoryId    String
+  repository      Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  event           String
+  action          String
+  headSha         String?
+  payloadDigest   String
+  admissionStatus String
+  admissionReason String?
+  processingRunId String?
+  processingRun   ProcessingRun? @relation(fields: [processingRunId], references: [id], onDelete: SetNull)
+  createdAt       DateTime       @default(now())
+
+  @@index([repositoryId, createdAt])
+}
+
+model ProcessingRun {
+  id              String            @id @default(uuid())
+  repositoryId    String
+  repository      Repository        @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  prNumber        Int
+  prTitle         String
+  headSha         String
+  baseRef         String?
+  status          RunStatus         @default(QUEUED)
+  attemptCount    Int               @default(0)
+  maxAttempts     Int               @default(3)
+  availableAt     DateTime          @default(now())
+  leaseOwner      String?
+  leaseUntil      DateTime?
+  lastErrorCode   String?
+  rawDiffSize     Int?
+  commentUrl      String?
+  steps           ProcessingStep[]
+  deliveries      WebhookDelivery[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([repositoryId, prNumber, headSha])
+  @@index([status, availableAt])
+}
+
+model ProcessingStep {
+  id         String        @id @default(uuid())
+  runId      String
+  run        ProcessingRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  stepName   String
+  status     StepStatus    @default(PENDING)
+  attempt    Int           @default(1)
+  externalId String?
+  error      String?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@unique([runId, stepName])
 }
 
 enum LogStatus {
