@@ -14,7 +14,8 @@ export type PatchErrorCode =
   | 'AMBIGUOUS_REPLACEMENT'
   | 'OVERLAPPING_OPERATIONS'
   | 'TOTAL_REMOVAL_REJECTED'
-  | 'EMPTY_CREATION';
+  | 'EMPTY_CREATION'
+  | 'INVALID_OPERATION';
 
 export interface PatchSuccessResult {
   success: true;
@@ -42,11 +43,11 @@ export class DocPatchService {
    */
   isValidTargetPath(targetPath: string): boolean {
     if (!targetPath || typeof targetPath !== 'string') return false;
-    const normalized = targetPath.trim().replace(/\\/g, '/');
+    const normalized = targetPath;
     if (normalized.includes('..') || normalized.startsWith('/') || normalized.includes('./')) {
       return false;
     }
-    return /^readme(\.md)?$/i.test(normalized);
+    return normalized === 'README.md';
   }
 
   /**
@@ -84,6 +85,9 @@ export class DocPatchService {
       };
     }
 
+    if (operations.some(op => !op || typeof op.oldText !== 'string' || typeof op.newText !== 'string')) {
+      return { success: false, code: 'INVALID_OPERATION', error: 'Each operation must contain string oldText and newText' };
+    }
     // 3. New text size limit validation
     const totalNewBytes = operations.reduce(
       (sum, op) => sum + Buffer.byteLength(op.newText || '', 'utf8'),
@@ -163,7 +167,7 @@ export class DocPatchService {
         if (firstIndex === -1) {
           firstIndex = searchIndex;
         }
-        searchIndex += op.oldText.length;
+        searchIndex += 1; // Count overlapping occurrences as ambiguous too.
       }
 
       if (count === 0) {
@@ -191,6 +195,9 @@ export class DocPatchService {
       });
     }
 
+    if (originalContent.length > 0 && locatedOps.some(op => op.startOffset === 0 && op.endOffset === originalContent.length)) {
+      return { success: false, code: 'TOTAL_REMOVAL_REJECTED', error: 'Whole-document replacement is not an allowed documentation patch' };
+    }
     // 6. Check for overlaps and sort by offset
     locatedOps.sort((a, b) => a.startOffset - b.startOffset);
 

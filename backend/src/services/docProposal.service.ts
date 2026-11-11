@@ -1,394 +1,136 @@
 import crypto from 'node:crypto';
+import { Prisma, DocProposal } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 import { githubService } from './github.service.js';
 import { docPatchService, PatchOperation } from './docPatch.service.js';
 import { resolveUserAccessToken } from './crypto.service.js';
+import { HttpError, externalStatus } from '../utils/errors.js';
 
 export interface CreateProposalInput {
-  repositoryId: string;
-  prNumber: number;
-  headSha: string;
-  title: string;
-  description?: string;
-  targetPath?: string;
-  operations: PatchOperation[];
-  evidence?: string;
-  isFork?: boolean;
-  originalFileContent: string | null;
+  runId?: string; repositoryId: string; prNumber: number; headSha: string; title: string;
+  description?: string; targetPath?: string; operations: PatchOperation[]; evidence?: string;
+  isFork?: boolean; originalFileContent: string | null;
 }
 
 export class DocProposalService {
-  /**
-   * Validates patch operations and creates a new DocProposal in PENDING_APPROVAL status.
-   */
   async createProposal(input: CreateProposalInput) {
     const targetPath = input.targetPath || 'README.md';
-
-    const patchResult = docPatchService.applyPatch(
-      input.originalFileContent,
-      input.operations,
-      targetPath
-    );
-
-    if (!patchResult.success) {
-      throw new Error(`Patch validation failed: [${patchResult.code}] ${patchResult.error}`);
-    }
-
-    return prisma.docProposal.create({
-      data: {
-        repositoryId: input.repositoryId,
-        prNumber: input.prNumber,
-        headSha: input.headSha,
-        baseFileHash: patchResult.baseFileHash,
-        targetPath,
-        title: input.title,
-        description: input.description,
-        operations: input.operations as any,
-        evidence: input.evidence,
-        previewContent: patchResult.patchedContent,
-        isFork: input.isFork ?? false,
-        status: 'PENDING_APPROVAL',
-      },
-    });
+    const patch = docPatchService.applyPatch(input.originalFileContent, input.operations, targetPath);
+    if (!patch.success) throw new HttpError(422, patch.code);
+    const data = { repositoryId: input.repositoryId, runId: input.runId, prNumber: input.prNumber,
+      headSha: input.headSha, baseFileHash: patch.baseFileHash, targetPath, title: input.title,
+      description: input.description, operations: input.operations as unknown as Prisma.InputJsonValue,
+      evidence: input.evidence, previewContent: patch.patchedContent, isFork: input.isFork ?? false };
+    return input.runId
+      ? prisma.docProposal.upsert({ where: { runId: input.runId }, update: {}, create: data })
+      : prisma.docProposal.create({ data });
   }
 
-  /**
-   * Approves and commits a documentation proposal with concurrency control and non-force push.
-   * Enforces ADR 0003 & Cases V18, V19:
-   * - Atomic lock against duplicate approval requests
-   * - Strict rejection of fork PR writes
-   * - Re-verifies PR state, HEAD SHA, and target file hash before committing
-   * - Git Data API non-force commit with CommitIntent tracking
-   */
-  async approveProposal(proposalId: string, userId: string) {
-    // 1. Retrieve proposal and parent repository
-    const proposal = await prisma.docProposal.findUnique({
-      where: { id: proposalId },
-      include: {
-        repository: {
-          include: {
-            user: true,
-          },
-        },
-      },
-    });
+  private async ownedProposal(id: string, userId: string) {
+    const proposal = await prisma.docProposal.findUnique({ where: { id }, include: { repository: { include: { user: true } } } });
+    if (!proposal || proposal.repository.userId !== userId) throw new HttpError(404, 'PROPOSAL_NOT_FOUND');
+    return proposal;
+  }
 
-    if (!proposal) {
-      const error: any = new Error('Proposal not found');
-      error.statusCode = 404;
-      throw error;
+  async approveProposal(proposalId: string, userId: string): Promise<{ success: boolean; proposal: DocProposal; commitSha: string | null; commitUrl: string | null }> {
+    const proposal = await this.ownedProposal(proposalId, userId);
+    const repo = proposal.repository;
+    if (!repo.isActive || !repo.desiredActive) throw new HttpError(409, 'MONITORING_DISABLED');
+    if (proposal.isFork) throw new HttpError(403, 'FORK_WRITE_FORBIDDEN');
+    const accessToken = resolveUserAccessToken(repo.user);
+    const canonical = await githubService.getRepositoryById(accessToken, repo.githubRepoId);
+    if (!canonical.permissions?.push && !canonical.permissions?.admin) throw new HttpError(403, 'WRITE_PERMISSION_REQUIRED');
+    if (proposal.status === 'APPLIED') return { success: true, proposal, commitSha: proposal.commitSha, commitUrl: proposal.commitUrl };
+    if (proposal.status === 'APPLYING') {
+      const intent = await prisma.commitIntent.findFirst({ where: { proposalId, status: 'PENDING' }, orderBy: { createdAt: 'desc' } });
+      const pr = await githubService.getPullRequestDetails(accessToken, repo.owner, repo.name, proposal.prNumber);
+      if (intent?.preparedCommitSha && pr && !pr.isFork) {
+        const verified = await githubService.verifyDocCommit(accessToken, repo.owner, repo.name, intent.preparedCommitSha, intent);
+        if (verified) {
+          const published = await githubService.isCommitInHistory(accessToken, repo.owner, repo.name, intent.preparedCommitSha, pr.headSha);
+          if (published) return this.confirm(proposal.id, intent.id, intent.preparedCommitSha, repo.fullName);
+          if (pr.state === 'open' && pr.headSha === intent.expectedParentSha && pr.headRef !== pr.baseRef) {
+            await githubService.publishPreparedCommit(accessToken, repo.owner, repo.name, pr.headRef, intent.preparedCommitSha);
+            return this.confirm(proposal.id, intent.id, intent.preparedCommitSha, repo.fullName);
+          }
+          throw new HttpError(409, 'HEAD_ADVANCED');
+        }
+      }
+      // A crash before persisting a commit intent is safe to retry after its request has expired.
+      if (!intent?.preparedCommitSha && proposal.updatedAt.getTime() < Date.now() - 300000) {
+        if (intent) await prisma.commitIntent.updateMany({ where: { id: intent.id, status: 'PENDING', preparedCommitSha: null }, data: { status: 'ABANDONED' } });
+        const reset = await prisma.docProposal.updateMany({ where: { id: proposalId, status: 'APPLYING', updatedAt: proposal.updatedAt }, data: { status: 'PENDING_APPROVAL' } });
+        if (reset.count) return this.approveProposal(proposalId, userId);
+      }
+      throw new HttpError(409, 'APPROVAL_REQUIRES_RECONCILIATION');
     }
-
-    // 2. Concurrency Lock: Atomically reserve proposal (V18)
-    const lockResult = await prisma.docProposal.updateMany({
-      where: {
-        id: proposalId,
-        status: 'PENDING_APPROVAL',
-      },
-      data: {
-        status: 'APPLYING',
-      },
-    });
-
-    if (lockResult.count === 0) {
-      const error: any = new Error(
-        `Proposal cannot be approved: current status is '${proposal.status}' (already processed or concurrently locked).`
-      );
-      error.statusCode = 409;
-      error.code = 'CONCURRENT_APPROVAL_CONFLICT';
-      throw error;
-    }
-
-    // 3. Reject Fork PR writes (ADR 0003, V19)
-    if (proposal.isFork) {
-      await prisma.docProposal.update({
-        where: { id: proposalId },
-        data: {
-          status: 'FAILED',
-          failureReason: 'FORK_WRITE_FORBIDDEN: Documentation changes on fork PRs cannot be written automatically.',
-        },
-      });
-
-      const error: any = new Error(
-        'Automated commits are not permitted for Pull Requests originating from forks.'
-      );
-      error.statusCode = 403;
-      error.code = 'FORK_WRITE_FORBIDDEN';
-      throw error;
-    }
-
-    const accessToken = resolveUserAccessToken(proposal.repository.user);
-    const owner = proposal.repository.owner;
-    const repo = proposal.repository.name;
-
+    if (proposal.status !== 'PENDING_APPROVAL') throw new HttpError(409, 'CONCURRENT_APPROVAL_CONFLICT');
+    const lock = await prisma.docProposal.updateMany({ where: { id: proposalId, status: 'PENDING_APPROVAL', repository: { userId } },
+      data: { status: 'APPLYING', approvedByUserId: userId, approvedAt: new Date() } });
+    if (!lock.count) throw new HttpError(409, 'CONCURRENT_APPROVAL_CONFLICT');
+    let intentId: string | undefined;
     try {
-      // 4. Fetch latest PR status from GitHub to verify freshness (V18, V19)
-      const prDetails = await githubService.getPullRequestDetails(
-        accessToken,
-        owner,
-        repo,
-        proposal.prNumber
-      );
-
-      if (!prDetails || prDetails.state !== 'open') {
-        await prisma.docProposal.update({
-          where: { id: proposalId },
-          data: {
-            status: 'STALE',
-            failureReason: 'PR_CLOSED: Pull Request is no longer open.',
-          },
+      const pr = await githubService.getPullRequestDetails(accessToken, repo.owner, repo.name, proposal.prNumber);
+      if (!pr || pr.state !== 'open') throw new HttpError(409, 'PR_CLOSED');
+      if (pr.isFork) throw new HttpError(403, 'FORK_WRITE_FORBIDDEN');
+      if (pr.headRef === pr.baseRef) throw new HttpError(403, 'BASE_BRANCH_WRITE_FORBIDDEN');
+      if (pr.headSha !== proposal.headSha) throw new HttpError(409, 'HEAD_ADVANCED');
+      const file = await githubService.getFileContent(accessToken, repo.owner, repo.name, proposal.targetPath, pr.headSha);
+      const current = file?.content ?? null;
+      const currentHash = crypto.createHash('sha256').update(current ?? '', 'utf8').digest('hex');
+      if (currentHash !== proposal.baseFileHash) throw new HttpError(409, 'FILE_MODIFIED_CONCURRENTLY');
+      const patch = docPatchService.applyPatch(current, proposal.operations as unknown as PatchOperation[], proposal.targetPath);
+      if (!patch.success) throw new HttpError(422, patch.code);
+      if (patch.patchedContent !== proposal.previewContent) throw new HttpError(409, 'PREVIEW_MISMATCH');
+      const intent = await prisma.commitIntent.create({ data: { proposalId, repositoryId: repo.id, prNumber: proposal.prNumber,
+        expectedParentSha: proposal.headSha, expectedContentHash: patch.newContentHash } });
+      intentId = intent.id;
+      const { commitSha } = await githubService.createDocCommit(accessToken, repo.owner, repo.name, pr.headRef, proposal.headSha,
+        proposal.targetPath, patch.patchedContent, `docs: apply approved documentation proposal\n\nIntent-ID: ${intent.id}`,
+        async sha => {
+          const prepared = await prisma.commitIntent.updateMany({ where: { id: intent.id, status: 'PENDING', proposal: { status: 'APPLYING' } }, data: { preparedCommitSha: sha } });
+          if (!prepared.count) throw new HttpError(409, 'COMMIT_INTENT_NO_LONGER_ACTIVE');
         });
-
-        const error: any = new Error('Pull Request is closed or unavailable.');
-        error.statusCode = 409;
-        error.code = 'PR_CLOSED';
-        throw error;
+      return await this.confirm(proposal.id, intent.id, commitSha, repo.fullName);
+    } catch (error) {
+      const status = externalStatus(error) ?? (error instanceof HttpError ? error.statusCode : undefined);
+      const definitive = !!status && [400, 401, 403, 404, 409, 422].includes(status);
+      // Timeout or database failure after a possible ref update is ambiguous: preserve the intent.
+      if (!intentId || definitive) {
+        if (intentId) await prisma.commitIntent.updateMany({ where: { id: intentId, status: 'PENDING' }, data: { status: 'ABANDONED' } });
+        await prisma.docProposal.updateMany({ where: { id: proposalId, status: 'APPLYING' },
+          data: { status: status === 409 || status === 422 ? 'STALE' : 'FAILED', failureReason: error instanceof HttpError ? error.code : 'DOCUMENTATION_APPLY_FAILED' } });
       }
-
-      if (prDetails.isFork) {
-        await prisma.docProposal.update({
-          where: { id: proposalId },
-          data: {
-            status: 'FAILED',
-            failureReason: 'FORK_WRITE_FORBIDDEN: Pull Request head repository differs from base repository.',
-          },
-        });
-
-        const error: any = new Error('Pull Request originates from a fork repository.');
-        error.statusCode = 403;
-        error.code = 'FORK_WRITE_FORBIDDEN';
-        throw error;
-      }
-
-      // Check if PR HEAD SHA advanced since proposal was created (V18)
-      if (prDetails.headSha !== proposal.headSha) {
-        await prisma.docProposal.update({
-          where: { id: proposalId },
-          data: {
-            status: 'STALE',
-            failureReason: `HEAD_ADVANCED: PR head advanced from ${proposal.headSha} to ${prDetails.headSha}.`,
-          },
-        });
-
-        const error: any = new Error(
-          `Pull Request head commit advanced since proposal was generated (expected: ${proposal.headSha}, current: ${prDetails.headSha}). Proposal marked STALE.`
-        );
-        error.statusCode = 409;
-        error.code = 'HEAD_ADVANCED';
-        throw error;
-      }
-
-      // 5. Fetch current target file at expected HEAD to verify base file hash (V18)
-      const currentFile = await githubService.getFileContent(
-        accessToken,
-        owner,
-        repo,
-        proposal.targetPath,
-        prDetails.headSha
-      );
-
-      const currentContent = currentFile ? currentFile.content : null;
-      const currentHash = crypto.createHash('sha256').update(currentContent ?? '', 'utf8').digest('hex');
-
-      if (currentHash !== proposal.baseFileHash) {
-        await prisma.docProposal.update({
-          where: { id: proposalId },
-          data: {
-            status: 'STALE',
-            failureReason: 'FILE_MODIFIED_CONCURRENTLY: Target file content hash diverged from proposal baseline.',
-          },
-        });
-
-        const error: any = new Error(
-          'Target file was modified concurrently. Proposal marked STALE.'
-        );
-        error.statusCode = 409;
-        error.code = 'FILE_MODIFIED_CONCURRENTLY';
-        throw error;
-      }
-
-      const patchResult = docPatchService.applyPatch(
-        currentContent,
-        proposal.operations as unknown as PatchOperation[],
-        proposal.targetPath
-      );
-
-      if (!patchResult.success) {
-        await prisma.docProposal.update({
-          where: { id: proposalId },
-          data: {
-            status: 'FAILED',
-            failureReason: `PATCH_FAILED: ${patchResult.error}`,
-          },
-        });
-
-        const error: any = new Error(`Failed to apply patch on current target file: ${patchResult.error}`);
-        error.statusCode = 422;
-        error.code = patchResult.code;
-        throw error;
-      }
-
-      // 6. Persist CommitIntent before executing external commit (ADR 0003, V20)
-      const intent = await prisma.commitIntent.create({
-        data: {
-          proposalId: proposal.id,
-          repositoryId: proposal.repositoryId,
-          prNumber: proposal.prNumber,
-          expectedParentSha: proposal.headSha,
-          expectedContentHash: patchResult.newContentHash,
-          status: 'PENDING',
-        },
-      });
-
-      const commitMessage = `docs(${proposal.targetPath}): ${proposal.title}\n\nAutomated documentation proposal applied via GitDocs.\nIntent-ID: ${intent.id}`;
-
-      try {
-        // 7. Write commit using Git Data API with non-force branch update
-        const { commitSha, commitUrl } = await githubService.createDocCommit(
-          accessToken,
-          owner,
-          repo,
-          prDetails.headRef,
-          proposal.headSha,
-          proposal.targetPath,
-          patchResult.patchedContent,
-          commitMessage
-        );
-
-        // 8. Confirm CommitIntent and mark DocProposal as APPLIED
-        await prisma.commitIntent.update({
-          where: { id: intent.id },
-          data: {
-            status: 'CONFIRMED',
-            appliedCommitSha: commitSha,
-          },
-        });
-
-        const appliedProposal = await prisma.docProposal.update({
-          where: { id: proposal.id },
-          data: {
-            status: 'APPLIED',
-            commitSha,
-            commitUrl,
-            approvedByUserId: userId,
-            approvedAt: new Date(),
-          },
-        });
-
-        console.log(`✅ [DocProposal] Proposal ${proposalId} committed successfully (${commitSha})`);
-
-        return {
-          success: true,
-          proposal: appliedProposal,
-          commitSha,
-          commitUrl,
-        };
-      } catch (commitErr: unknown) {
-        // Abandon intent on commit failure
-        await prisma.commitIntent.update({
-          where: { id: intent.id },
-          data: { status: 'ABANDONED' },
-        });
-
-        const errorMessage = commitErr instanceof Error ? commitErr.message : String(commitErr);
-        const isConflict = errorMessage.includes('422') || errorMessage.includes('fast-forward');
-
-        await prisma.docProposal.update({
-          where: { id: proposal.id },
-          data: {
-            status: isConflict ? 'STALE' : 'FAILED',
-            failureReason: errorMessage,
-          },
-        });
-
-        throw commitErr;
-      }
-    } catch (outerErr: unknown) {
-      // If error happened after locking but before status updated to APPLIED or STALE, mark as FAILED
-      const current = await prisma.docProposal.findUnique({ where: { id: proposalId } });
-      if (current && current.status === 'APPLYING') {
-        const errorMsg = outerErr instanceof Error ? outerErr.message : String(outerErr);
-        await prisma.docProposal.update({
-          where: { id: proposalId },
-          data: {
-            status: 'FAILED',
-            failureReason: errorMsg,
-          },
-        });
-      }
-      throw outerErr;
+      throw error instanceof HttpError ? error : new HttpError(definitive ? status! : 503, 'DOCUMENTATION_APPLY_REQUIRES_RECONCILIATION');
     }
   }
 
-  /**
-   * Rejects a documentation proposal.
-   */
-  async rejectProposal(proposalId: string, _userId: string, reason?: string) {
-    const proposal = await prisma.docProposal.findUnique({
-      where: { id: proposalId },
+  private async confirm(proposalId: string, intentId: string, sha: string, fullName: string) {
+    const commitUrl = `https://github.com/${fullName}/commit/${sha}`;
+    const proposal = await prisma.$transaction(async tx => {
+      await tx.commitIntent.update({ where: { id: intentId }, data: { status: 'CONFIRMED', appliedCommitSha: sha } });
+      return tx.docProposal.update({ where: { id: proposalId }, data: { status: 'APPLIED', commitSha: sha, commitUrl, failureReason: null } });
     });
-
-    if (!proposal) {
-      const error: any = new Error('Proposal not found');
-      error.statusCode = 404;
-      throw error;
-    }
-
-    if (proposal.status !== 'PENDING_APPROVAL') {
-      const error: any = new Error(`Proposal cannot be rejected from status '${proposal.status}'`);
-      error.statusCode = 409;
-      throw error;
-    }
-
-    return prisma.docProposal.update({
-      where: { id: proposalId },
-      data: {
-        status: 'REJECTED',
-        failureReason: reason || 'Rejected by user',
-      },
-    });
+    return { success: true, proposal, commitSha: sha, commitUrl };
   }
 
-  /**
-   * Fetches proposal details by ID.
-   */
-  async getProposal(proposalId: string) {
-    return prisma.docProposal.findUnique({
-      where: { id: proposalId },
-      include: {
-        repository: true,
-        approvedByUser: {
-          select: {
-            id: true,
-            username: true,
-            avatarUrl: true,
-          },
-        },
-      },
-    });
+  async rejectProposal(proposalId: string, userId: string, reason?: string) {
+    await this.ownedProposal(proposalId, userId);
+    const result = await prisma.docProposal.updateMany({ where: { id: proposalId, status: 'PENDING_APPROVAL', repository: { userId } },
+      data: { status: 'REJECTED', failureReason: reason?.slice(0, 1000) || 'Rejected by user' } });
+    if (!result.count) throw new HttpError(409, 'CONCURRENT_APPROVAL_CONFLICT');
+    return prisma.docProposal.findUnique({ where: { id: proposalId } });
   }
 
-  /**
-   * Lists proposals for a repository.
-   */
-  async listProposals(repositoryId: string, prNumber?: number) {
-    return prisma.docProposal.findMany({
-      where: {
-        repositoryId,
-        ...(prNumber ? { prNumber } : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      include: {
-        approvedByUser: {
-          select: {
-            id: true,
-            username: true,
-            avatarUrl: true,
-          },
-        },
-      },
-    });
+  async getProposal(proposalId: string, userId: string) {
+    const { repository: _repository, ...proposal } = await this.ownedProposal(proposalId, userId);
+    return proposal; // Never serialize repository.user (including its credentials).
+  }
+
+  async listProposals(repositoryId: string, userId: string, prNumber?: number) {
+    const repo = await prisma.repository.findFirst({ where: { id: repositoryId, userId } });
+    if (!repo) throw new HttpError(404, 'REPOSITORY_NOT_FOUND');
+    return prisma.docProposal.findMany({ where: { repositoryId, ...(prNumber ? { prNumber } : {}) }, orderBy: { createdAt: 'desc' }, take: 100 });
   }
 }
-
 export const docProposalService = new DocProposalService();
