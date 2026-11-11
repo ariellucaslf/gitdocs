@@ -24,34 +24,34 @@ export const findingCategorySchema = z.enum([
 export type FindingCategory = z.infer<typeof findingCategorySchema>;
 
 export const analysisFindingSchema = z.object({
-  file: z.string(),
-  lineRange: z.string().optional(),
+  file: z.string().min(1).max(500),
+  lineRange: z.string().max(100).optional(),
   category: findingCategorySchema,
   severity: z.enum(['info', 'warning', 'critical']),
   title: z.string().max(200),
   message: z.string().max(2000),
-  evidence: z.string().max(1000),
-});
+  evidence: z.string().min(1).max(1000),
+}).strict();
 
 export type AnalysisFinding = z.infer<typeof analysisFindingSchema>;
 
 export const suggestedDocUpdateSchema = z.object({
   title: z.string().max(200),
-  targetFile: z.string().default('README.md'),
+  targetFile: z.literal('README.md').default('README.md'),
   description: z.string().max(1000),
-  proposedContent: z.string().max(20000),
-  evidence: z.string().max(1000),
-});
+  operations: z.array(z.object({ oldText: z.string().max(65536), newText: z.string().max(20000) }).strict()).min(1).max(10),
+  evidence: z.string().min(1).max(1000),
+}).strict();
 
 export type SuggestedDocUpdate = z.infer<typeof suggestedDocUpdateSchema>;
 
 export const validatedAnalysisSchema = z.object({
   schemaVersion: z.literal(1).default(1),
   summary: z.string().max(3000),
-  categories: z.array(findingCategorySchema).min(1),
-  findings: z.array(analysisFindingSchema).default([]),
+  categories: z.array(findingCategorySchema).min(1).max(10),
+  findings: z.array(analysisFindingSchema).max(30).default([]),
   suggestedDocUpdate: suggestedDocUpdateSchema.nullable().optional(),
-});
+}).strict();
 
 export type ValidatedAnalysis = z.infer<typeof validatedAnalysisSchema>;
 
