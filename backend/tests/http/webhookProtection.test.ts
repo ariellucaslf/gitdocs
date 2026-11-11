@@ -22,6 +22,16 @@ vi.mock('../../src/config/prisma.js', () => ({
       create: vi.fn(),
       update: vi.fn(),
     },
+    webhookDelivery: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      create: vi.fn().mockResolvedValue({}),
+    },
+    processingRun: {
+      upsert: vi.fn().mockResolvedValue({ id: 'run-1', status: 'QUEUED' }),
+    },
+    processingStep: {
+      create: vi.fn().mockResolvedValue({}),
+    },
   },
 }));
 
