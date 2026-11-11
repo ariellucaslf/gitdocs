@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import { DocProposals } from './DocProposals';
 import { RepositoryItem, toggleRepository } from '@/lib/api';
 import {
   Search,
@@ -17,11 +18,10 @@ import {
 
 interface RepositoryListProps {
   repositories: RepositoryItem[];
-  token: string;
   onRefresh: () => void;
 }
 
-export function RepositoryList({ repositories, token, onRefresh }: RepositoryListProps) {
+export function RepositoryList({ repositories, onRefresh }: RepositoryListProps) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [loadingRepoId, setLoadingRepoId] = useState<number | null>(null);
@@ -38,26 +38,14 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
 
   const handleToggle = async (
     repo: RepositoryItem,
-    field: 'isActive' | 'autoCommitReadme',
     value: boolean
   ) => {
     try {
       setLoadingRepoId(repo.id);
 
-      const isActivating = field === 'isActive' ? value : repo.isActive;
-      const autoCommit = field === 'autoCommitReadme' ? value : repo.autoCommitReadme;
-
-      // Backend webhook listener public endpoint URL
-      const webhookUrl = `${window.location.origin.replace('3000', '4000')}/api/webhooks`;
-
-      await toggleRepository(token, {
+      await toggleRepository({
         githubRepoId: repo.id,
-        name: repo.name,
-        fullName: repo.fullName,
-        owner: repo.owner,
-        isActive: isActivating,
-        autoCommitReadme: autoCommit,
-        webhookUrl: isActivating ? webhookUrl : undefined,
+        isActive: value,
       });
 
       onRefresh();
@@ -79,7 +67,7 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search your GitHub repositories..."
+            placeholder="Search repositories on this page..."
             className="w-full bg-surface-elevated/80 border border-surface-border/80 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500/60 focus:ring-1 focus:ring-emerald-500/30 transition-all"
           />
         </div>
@@ -208,13 +196,13 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
                         AI PR Review
                       </span>
                       <span className="text-[11px] text-slate-400">
-                        {repo.isActive ? 'Webhook monitoring active' : 'Monitoring paused'}
+                        {repo.provisioningState === 'ERROR' ? 'Webhook needs attention' : repo.provisioningState === 'PROVISIONING' ? 'Configuring webhook…' : repo.isActive ? 'Webhook monitoring active' : 'Monitoring paused'}
                       </span>
                     </div>
 
                     <button
                       disabled={isLoading}
-                      onClick={() => handleToggle(repo, 'isActive', !repo.isActive)}
+                      onClick={() => handleToggle(repo, !repo.isActive)}
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
                         repo.isActive ? 'bg-emerald-500' : 'bg-slate-700'
                       } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
@@ -227,37 +215,30 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
                     </button>
                   </div>
 
-                  {/* README Autocommit Toggle */}
+                  {/* README Autocommit Status (Disabled by safety policy) */}
                   {repo.isActive && (
                     <div className="flex items-center justify-between pt-2 border-t border-slate-800/40">
                       <div>
-                        <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-                          <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                        <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-slate-400" />
                           Auto-commit README
                         </span>
-                        <span className="text-[11px] text-slate-400">
-                          Commits suggested docs on PR branch
+                        <span className="text-[11px] text-amber-400/90 block">
+                          Disabled for safety: requires human approval
                         </span>
                       </div>
 
-                      <button
-                        disabled={isLoading}
-                        onClick={() =>
-                          handleToggle(repo, 'autoCommitReadme', !repo.autoCommitReadme)
-                        }
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                          repo.autoCommitReadme ? 'bg-indigo-500' : 'bg-slate-700'
-                        } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            repo.autoCommitReadme ? 'translate-x-6' : 'translate-x-1'
-                          }`}
-                        />
-                      </button>
+                      <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                        Manual Approval
+                      </span>
                     </div>
                   )}
 
+                  {repo.provisioningState === 'ERROR' && <div className="text-xs text-rose-300" role="alert">
+                    {repo.lastErrorCode || 'Webhook configuration failed'}
+                    <button className="underline ml-2" disabled={isLoading} onClick={() => handleToggle(repo, repo.desiredActive ?? false)}>Retry</button>
+                  </div>}
+                  {repo.dbId && <DocProposals repositoryId={repo.dbId} />}
                   {isLoading && (
                     <div className="flex items-center gap-1.5 text-[11px] text-emerald-400 justify-end pt-1">
                       <Loader2 className="w-3 h-3 animate-spin" /> Updating GitHub...

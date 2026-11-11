@@ -1,216 +1,110 @@
-# 🛠️ GitDocs & PR-Committer
+# GitDocs & PR-Committer
 
-<div align="center">
+GitDocs is a self-hosted GitHub pull request assistant. It analyzes code changes with Google Gemini, posts a structured review, and proposes focused README patches that a repository owner can approve in the dashboard.
 
-![Next.js](https://img.shields.io/badge/Next.js_14-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)
-![Express](https://img.shields.io/badge/Express.js-000000?style=for-the-badge&logo=express&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript_5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
-![Prisma](https://img.shields.io/badge/Prisma_ORM-2D3748?style=for-the-badge&logo=prisma&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL_15-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
-![Google Gemini](https://img.shields.io/badge/Gemini_1.5_Flash-8E75B2?style=for-the-badge&logo=google&logoColor=white)
-![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=for-the-badge&logo=tailwind-css&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-emerald?style=for-the-badge)
+Documentation changes require explicit approval. The legacy README autocommit switch is disabled, including for repositories where it was previously enabled.
 
-<p align="center">
-  <strong>Automated GitHub Pull Request reviews and smart documentation bot powered by Google Gemini AI and Next.js 14.</strong>
-</p>
+## How it works
 
-[Key Features](#-key-features) • [Architecture](#-architecture) • [Quick Start](#-quick-start) • [Environment Variables](#-environment-variables) • [Tech Stack](#-tech-stack)
-
-</div>
-
----
-
-## 📌 Overview
-
-**GitDocs** is an open-source, developer-first tool designed to automate Pull Request code reviews and keep documentation always synchronized with structural code changes:
-
-1. **Dashboard Portal (Next.js 14 App Router)**: Authenticate with GitHub OAuth, inspect your repositories, toggle webhook monitoring on/off, and view live review execution logs.
-2. **Webhook Receiver & Security (Express + TypeScript)**: Receives GitHub PR webhooks with cryptographic HMAC SHA-256 signature verification (`x-hub-signature-256`).
-3. **AI Code Review Engine (Google Gemini 1.5 Flash)**: Sanitizes raw diffs (ignoring lockfiles and binaries), categorizes changes (*Features, Bug Fixes, Refactoring, Breaking Changes*), and generates clean Markdown review checklists.
-4. **Automated PR Comments & README Commits**: Posts comments directly to the GitHub PR. If structural changes are introduced and `autoCommitReadme` is active, the bot commits updated documentation directly to the PR branch.
-
----
-
-## 📐 Architecture
+1. Sign in with GitHub. The NextAuth server exchanges the OAuth credential with the backend, which stores it encrypted. The browser receives identity only.
+2. Enable monitoring on a repository where you have administrative permissions. The server provisions a signed HTTPS webhook and exposes its actual provisioning state.
+3. A verified pull request delivery is admitted atomically to PostgreSQL. Duplicate delivery IDs and duplicate revisions do not create another run.
+4. A separate worker leases the run, checks that its PR revision is current, analyzes a filtered diff, persists the analysis, and publishes a comment marked with the run ID and analyzed SHA.
+5. When enough context exists, a documentation proposal contains limited replacements against the README at that revision. Review the patch and preview, then approve or reject it.
+6. Approved changes use a non-force Git ref update. Fork PRs receive suggestions only. Stale proposals cannot overwrite newer work.
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor Dev as Developer
-    participant GH as GitHub (PR & Webhooks)
-    participant Web as Next.js Dashboard
-    participant API as Express Backend
-    participant DB as PostgreSQL (Prisma)
-    participant AI as Google Gemini 1.5
-
-    Dev->>Web: Log in with GitHub OAuth
-    Web-->>Dev: Authenticated Session (Access Token)
-    Dev->>Web: Toggle monitoring on repository (e.g., repo-A)
-    Web->>API: POST /api/repositories/toggle
-    API->>GH: Create Webhook on repo-A via Octokit
-    API->>DB: Save Repository state (isActive: true)
-    API-->>Web: Success response
-
-    Note over Dev,GH: Developer opens or syncs a Pull Request
-    GH->>API: POST /api/webhooks (HMAC SHA-256 verified)
-    API->>DB: Create WebhookLog (Status: PENDING)
-    API-->>GH: HTTP 202 Accepted
-    
-    rect rgb(20, 30, 45)
-        Note over API,AI: Asynchronous Background Processing
-        API->>GH: Fetch raw PR diff file
-        GH-->>API: Return Diff content
-        API->>AI: Analyze Diff (Sanitized + Structured Prompt)
-        AI-->>API: Markdown Summary + Suggested README
-        API->>GH: Post Review Comment on PR
-        opt autoCommitReadme is true & README updates suggested
-            API->>GH: Commit updated README.md to PR branch
-        end
-        API->>DB: Update WebhookLog (Status: SUCCESS, Comment URL)
-    end
+flowchart LR
+    User --> Next[Next.js dashboard and BFF]
+    Next --> API[Express API]
+    GitHub -->|signed webhook| API
+    API --> DB[(PostgreSQL)]
+    DB --> Worker
+    Worker --> Gemini
+    Worker -->|review comment| GitHub
+    User -->|explicit proposal approval| Next
+    API -->|approved README commit| GitHub
 ```
 
----
+The API does not start a background review after accepting a webhook. Keep the worker running alongside it. External effects are reconciled after ambiguous failures; this is recoverable processing, not a guarantee of exactly-once execution on GitHub.
 
-## ✨ Key Features
+## Repository structure
 
-- **🚀 Instant AI Code Review**: Automated code summaries with structured sections, checklists, and impact analysis.
-- **📝 Automated README Commits**: Keep your documentation up to date automatically on every structural PR.
-- **🛡️ HMAC Signature Verification**: Rejects any unauthenticated or tampered webhook payloads.
-- **⚡ Token Optimization & Diff Sanitization**: Automatically strips lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`), build artifacts, and maps to protect token quotas.
-- **🌗 Dark Mode Dashboard**: Clean dashboard built with Tailwind CSS, Lucide icons, and responsive layouts.
-- **🔑 Bring Your Own Key (BYOK)**: 100% self-hosted readiness using free Google AI Studio keys.
+| Location | Purpose |
+| --- | --- |
+| `backend/src/controllers/`, `routes/`, `middlewares/` | HTTP validation, ownership and authentication |
+| `backend/src/worker/` | Persistent queue, leases, fencing and review workflow |
+| `backend/src/services/` | GitHub/Gemini adapters, encryption, hook provisioning and documentation proposals |
+| `backend/prisma/` | Database schema and versioned migrations |
+| `backend/tests/` | Unit, HTTP, frontend boundary and PostgreSQL integration tests |
+| `frontend/src/` | Next.js App Router dashboard, server-side OAuth and restricted BFF proxy |
+| `.github/workflows/ci.yml` | Types, migrations, tests and production builds |
 
----
+Stack: Node.js 24.16.0, npm Workspaces, Next.js 16 / React 19, Express 4, TypeScript, Prisma 5, PostgreSQL 15 and the maintained `@google/genai` SDK. Dependencies are locked in `package-lock.json`.
 
-## ⚙️ Tech Stack
+## Local development
 
-| Layer | Technology | Description |
-| :--- | :--- | :--- |
-| **Monorepo** | npm Workspaces | Root orchestrator for `/backend` and `/frontend` |
-| **Frontend** | Next.js 14 (App Router) + TypeScript | Modern user portal and repository management dashboard |
-| **Styling** | Tailwind CSS + Lucide Icons | Dark mode glassmorphic UI |
-| **Backend** | Express + TypeScript (Strict Mode) | Modular MVC architecture with dedicated domain controllers |
-| **ORM & DB** | Prisma ORM + PostgreSQL 15 | Type-safe schema models with cascade relations |
-| **Authentication** | NextAuth.js (Auth.js) | GitHub OAuth provider with `repo` and `write:repo_hook` scopes |
-| **AI Processing** | `@google/generative-ai` | Google Gemini 1.5 Flash integration |
-| **GitHub SDK** | `@octokit/rest` | Repository management, webhook subscriptions, and PR commits |
-| **Validation** | Zod | Runtime schema validation for environment variables and payloads |
-
----
-
-## 📁 Monorepo Structure
-
-```text
-gitdocs/
-├── docker-compose.yml              # Local PostgreSQL 15 container
-├── package.json                    # Monorepo root with workspace scripts
-├── backend/                        # Express MVC REST API & Webhook Engine
-│   ├── prisma/
-│   │   └── schema.prisma           # Prisma database models (User, Repository, WebhookLog)
-│   ├── src/
-│   │   ├── config/                 # Zod validated env and Prisma singleton
-│   │   ├── controllers/            # auth.controller, repository.controller, webhook.controller
-│   │   ├── middlewares/            # auth.middleware, webhookSignature.middleware
-│   │   ├── routes/                 # Feature routes aggregated in routes/index.ts
-│   │   ├── services/               # github.service, gemini.service, prProcessor.service
-│   │   ├── utils/                  # Standard envelope response helpers
-│   │   ├── app.ts                  # Express application setup
-│   │   └── server.ts               # Server startup listener
-│   └── package.json
-└── frontend/                       # Next.js 14 App Router Dashboard
-    ├── src/
-    │   ├── app/                    # Layout, page.tsx, NextAuth route handlers
-    │   ├── components/             # Navbar, RepositoryList, WebhookLogsTable, StatsCards
-    │   └── lib/                    # NextAuth options and typed API client
-    ├── tailwind.config.js
-    └── package.json
-```
-
----
-
-## 🚀 Quick Start
-
-### 1. Prerequisites
-- **Node.js**: v18.18+ or v20+
-- **Docker & Docker Compose**: For local PostgreSQL
-
-### 2. Clone and Install Dependencies
+Prerequisites: the Node version in `.nvmrc`, npm 10+, Docker Compose, a development GitHub OAuth App, and a Gemini API key/model available in your Google project.
 
 ```bash
-git clone https://github.com/ariellucaslf/gitdocs.git
-cd gitdocs
-npm install
+npm ci
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env.local
 ```
 
-### 3. Start PostgreSQL with Docker
+Edit both files before starting the applications. Generate separate random secrets, for example with `openssl rand -hex 32`. `ENCRYPTION_KEY` must be exactly 64 hex characters. Use the same `INTERNAL_AUTH_SECRET` on both servers; keep it separate from `NEXTAUTH_SECRET`. No built-in signing/encryption secrets are used.
+
+Set your OAuth callback to `http://localhost:3000/api/auth/callback/github`. Set `GEMINI_MODEL` explicitly to a currently available model. The key belongs to the installation, not to each dashboard user.
 
 ```bash
-docker-compose up -d
+docker compose up -d postgres
+npm run db:generate
+npm run db:migrate:deploy
 ```
 
-### 4. Configure Environment Variables
-
-#### Backend Configuration (`backend/.env`)
-Create `backend/.env` (or copy from `backend/.env.example`):
-```env
-PORT=4000
-DATABASE_URL="postgresql://gitdocs_user:gitdocs_password@localhost:5432/gitdocs_db?schema=public"
-GITHUB_CLIENT_ID="your-github-oauth-client-id"
-GITHUB_CLIENT_SECRET="your-github-oauth-client-secret"
-GITHUB_WEBHOOK_SECRET="your-secure-webhook-secret-phrase"
-GEMINI_API_KEY="your-google-gemini-api-key"
-```
-
-#### Frontend Configuration (`frontend/.env.local`)
-Create `frontend/.env.local` (or copy from `frontend/.env.example`):
-```env
-NEXT_PUBLIC_API_URL="http://localhost:4000/api"
-NEXTAUTH_URL="http://localhost:3000"
-NEXTAUTH_SECRET="your-random-32-char-secret-string"
-GITHUB_CLIENT_ID="your-github-oauth-client-id"
-GITHUB_CLIENT_SECRET="your-github-oauth-client-secret"
-```
-
-> **How to get credentials:**
-> - **Google Gemini API Key**: Free at [Google AI Studio](https://aistudio.google.com/).
-> - **GitHub OAuth App**: Go to GitHub > Settings > Developer settings > OAuth Apps > *New OAuth App*.
->   - Homepage URL: `http://localhost:3000`
->   - Authorization callback URL: `http://localhost:3000/api/auth/callback/github`
-
-### 5. Synchronize Database Schema
+Run each process in its own terminal:
 
 ```bash
-npm run db:push
-```
-
-### 6. Run the Applications
-
-In separate terminals:
-
-```bash
-# Terminal 1 — Backend API (port 4000)
 npm run dev:backend
-
-# Terminal 2 — Frontend Dashboard (port 3000)
+npm run worker
 npm run dev:frontend
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser!
+Open [the local dashboard](http://localhost:3000). A real GitHub webhook needs a public HTTPS address forwarded to the backend's `/api/webhooks`. Configure that address in `GITHUB_WEBHOOK_URL`; changing a browser URL or frontend API variable does not change webhook routing. HTTP localhost alone cannot receive GitHub deliveries.
 
----
+For an existing database created by `db:push`, follow the baseline procedure in [DEPLOYMENT.md](DEPLOYMENT.md) before applying migrations. Do not reset existing data or use `db:push` in production.
 
-## 🧪 Verification & Type-Checking
-
-Run full monorepo type-checking:
+## Verification
 
 ```bash
 npm run typecheck
+npm test
+npm run build:backend
+npm run build:frontend
 ```
 
----
+The frontend production build uses Webpack explicitly for reproducibility across restricted build environments. Tests do not call GitHub or Gemini.
 
-## 📄 License
+PostgreSQL integration tests require an explicit isolated local database whose name ends in `_test`. They apply migrations and clean up only their own fixture users/repositories:
 
-This project is licensed under the [MIT License](LICENSE).
+```bash
+TEST_DATABASE_URL="postgresql://test_user:test_password@127.0.0.1:55436/gitdocs_review_test" npm run test:integration
+```
+
+The runner refuses non-test database names, non-local hosts and production mode. `/health` and `/health/liveness` check the API process; `/health/readiness` checks database connectivity. These endpoints do not prove the worker or external providers are healthy.
+
+## Boundaries and data policy
+
+- Each repository has one local responsible user. Shared organization memberships and GitHub App installation credentials are not implemented.
+- GitHub OAuth currently requests `repo` and `write:repo_hook` scopes. Use a trusted deployment and dedicated test repositories when evaluating it.
+- Known credential files and binary/lock artifacts are excluded; recognizable secrets are redacted. These filters cannot guarantee that arbitrary code is free of sensitive data. Enabling analysis sends retained diffs, bounded PR metadata and README context to Google.
+- Truncated input is identified in the review; automatic documentation proposals are disabled when context is incomplete.
+- Proposals target only a regular UTF-8 root `README.md`, with at most 10 replacements and 20 KiB of new text. Symlinks, other paths, ambiguous replacements and whole-document replacements are rejected.
+- Job results and proposals persist in PostgreSQL. Automated retention and a community pilot are still future work; operators must control access and deletion.
+- UI search/filters operate on the displayed page. Repository/log pagination and summary totals come from the server.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for production setup and [OPERATIONS.md](OPERATIONS.md) for recovery and credential rotation. The software is an assistant; evaluate suggestions before applying them.
+
+## License
+
+[MIT](LICENSE).

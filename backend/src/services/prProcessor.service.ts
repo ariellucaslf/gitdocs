@@ -1,6 +1,8 @@
 import { prisma } from '../config/prisma.js';
 import { githubService } from './github.service.js';
 import { geminiService } from './gemini.service.js';
+import { resolveUserAccessToken } from './crypto.service.js';
+import { formatReviewComment } from '../utils/commentFormatter.js';
 
 export interface PullRequestPayloadData {
   number: number;
@@ -43,11 +45,11 @@ export class PRProcessorService {
         include: { user: true },
       });
 
-      if (!dbRepo || !dbRepo.user || !dbRepo.user.accessToken) {
+      if (!dbRepo || !dbRepo.user) {
         throw new Error(`Repository or user authentication not found for repository ID: ${repositoryId}`);
       }
 
-      const accessToken = dbRepo.user.accessToken;
+      const accessToken = resolveUserAccessToken(dbRepo.user);
       const owner = repository.owner.login;
       const repoName = repository.name;
       const prNumber = pullRequest.number;
@@ -69,43 +71,59 @@ export class PRProcessorService {
         rawDiff
       );
 
-      // 4. Post AI review comment on the Pull Request
+      // Handle skipped analysis (e.g. diff was empty after sanitization)
+      if (analysis.kind === 'skipped') {
+        console.log(`⏭️ [PRProcessor] PR #${prNumber} analysis skipped (reason: ${analysis.reason}).`);
+        await prisma.webhookLog.update({
+          where: { id: logId },
+          data: {
+            status: 'SUCCESS',
+            errorMessage: `Skipped: ${analysis.reason}`,
+          },
+        });
+        return;
+      }
+
+      // Handle AI failure explicitly: must NEVER be marked as SUCCESS (ADR 0005, V09)
+      if (analysis.kind === 'failed') {
+        console.error(`❌ [PRProcessor] PR #${prNumber} AI analysis failed: [${analysis.code}] ${analysis.message}`);
+        await prisma.webhookLog.update({
+          where: { id: logId },
+          data: {
+            status: 'ERROR',
+            errorMessage: `AI_${analysis.code}: ${analysis.message}`,
+          },
+        });
+        return;
+      }
+
+      // 4. Deterministically format review comment from validated structured schema
+      const commentMarkdown = formatReviewComment({
+        analysis: analysis.data,
+        usage: analysis.usage,
+        truncated: analysis.truncated,
+      });
+
+      // 5. Post review comment on the Pull Request
       const commentUrl = await githubService.postPullRequestComment(
         accessToken,
         owner,
         repoName,
         prNumber,
-        analysis.summaryMarkdown
+        commentMarkdown
       );
 
       console.log(`💬 [PRProcessor] Comment posted to PR #${prNumber}: ${commentUrl}`);
 
-      // 5. Handle automatic README commit if enabled and structural changes detected
-      if (dbRepo.autoCommitReadme && analysis.suggestedReadmeUpdate) {
-        try {
-          const branch = pullRequest.head.ref;
-          const headOwner = pullRequest.head.repo?.owner?.login || owner;
-          const headRepo = pullRequest.head.repo?.name || repoName;
-
-          console.log(`📝 [PRProcessor] Autocommitting suggested README updates to branch '${branch}'...`);
-
-          await githubService.commitFileToBranch(
-            accessToken,
-            headOwner,
-            headRepo,
-            branch,
-            'README.md',
-            analysis.suggestedReadmeUpdate,
-            `docs: auto-update README.md from PR #${prNumber} review [skip ci]`
-          );
-
-          console.log(`✅ [PRProcessor] README.md committed successfully to branch ${branch}`);
-        } catch (commitErr) {
-          console.error(`⚠️ [PRProcessor] Failed to autocommit README.md:`, commitErr);
-        }
+      // 6. Direct README autocommit remains suspended to prevent data loss (ADR 0003)
+      if (dbRepo.autoCommitReadme && analysis.data.suggestedDocUpdate) {
+        console.warn(
+          `🛡️ [PRProcessor] Direct README autocommit blocked for PR #${prNumber} (repository: ${repository.full_name}). ` +
+            `Documentation proposals require human review before applying.`
+        );
       }
 
-      // 6. Update WebhookLog to SUCCESS
+      // 7. Update WebhookLog to SUCCESS only when analysis and comment succeed
       await prisma.webhookLog.update({
         where: { id: logId },
         data: {
@@ -126,7 +144,7 @@ export class PRProcessorService {
           status: 'ERROR',
           errorMessage,
         },
-      }).catch((dbErr) => console.error('Failed to update error status on WebhookLog:', dbErr));
+      }).catch((dbErr: unknown) => console.error('Failed to update error status on WebhookLog:', dbErr));
     }
   }
 }

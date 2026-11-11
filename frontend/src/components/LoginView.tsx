@@ -35,7 +35,7 @@ export function LoginView() {
         </h1>
 
         <p className="mt-6 text-lg sm:text-xl text-slate-300 max-w-2xl mx-auto leading-relaxed">
-          Connect your GitHub repositories in seconds. GitDocs analyzes incoming code diffs, posts structured review checklists, and autocommits documentation updates.
+          Connect your GitHub repositories in seconds. GitDocs analyzes incoming code diffs, posts structured review checklists, and suggests documentation changes for your approval.
         </p>
 
         {/* CTA Button */}
@@ -55,7 +55,7 @@ export function LoginView() {
             <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 mb-4">
               <Zap className="w-5 h-5" />
             </div>
-            <h2 className="font-bold text-base text-slate-100">Smart Gemini 1.5 Reviews</h2>
+            <h2 className="font-bold text-base text-slate-100">Structured AI Reviews</h2>
             <p className="text-xs text-slate-400 mt-2 leading-relaxed">
               Instant code reviews highlighting features, bug fixes, breaking changes and actionable checklists.
             </p>
@@ -65,9 +65,9 @@ export function LoginView() {
             <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-4">
               <BookOpen className="w-5 h-5" />
             </div>
-            <h2 className="font-bold text-base text-slate-100">Auto-Commit README</h2>
+            <h2 className="font-bold text-base text-slate-100">Review README Changes</h2>
             <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              Keep your docs up to date effortlessly. The bot commits documentation changes straight to your PR branch.
+              Keep your docs up to date effortlessly. Review a patch and explicitly approve it before a commit is made to the PR branch.
             </p>
           </div>
 
@@ -77,7 +77,7 @@ export function LoginView() {
             </div>
             <h2 className="font-bold text-base text-slate-100">HMAC Webhook Security</h2>
             <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-              Secure webhook signature validation, zero-leak credential architecture and BYOK open-source readiness.
+              Secure webhook signature validation, server-side credentials and a self-hosted configuration.
             </p>
           </div>
         </div>
@@ -85,7 +85,7 @@ export function LoginView() {
 
       {/* Footer */}
       <footer className="text-center text-xs text-slate-500 py-4 border-t border-slate-800/40 relative z-10">
-        GitDocs & PR-Committer • Built with Next.js 14, Express, PostgreSQL & Prisma
+        GitDocs & PR-Committer • Built with Next.js, Express, PostgreSQL & Prisma
       </footer>
     </div>
   );

@@ -1,23 +1,16 @@
 'use client';
 
 import React from 'react';
-import { RepositoryItem, WebhookLogItem } from '@/lib/api';
 import { ShieldCheck, GitPullRequest, Sparkles, FileEdit } from 'lucide-react';
 
-interface StatsCardsProps {
-  repositories: RepositoryItem[];
-  logs: WebhookLogItem[];
-}
-
-export function StatsCards({ repositories, logs }: StatsCardsProps) {
-  const activeReposCount = repositories.filter((r) => r.isActive).length;
-  const autoCommitCount = repositories.filter((r) => r.isActive && r.autoCommitReadme).length;
-  const successfulReviewsCount = logs.filter((l) => l.status === 'SUCCESS').length;
-
+interface StatsCardsProps { aggregates: Record<string, number | string>; }
+export function StatsCards({ aggregates }: StatsCardsProps) {
+  const activeReposCount = aggregates.activeRepositories ?? 0;
+  const successfulReviewsCount = aggregates.successfulReviews ?? 0;
   const stats = [
     {
       title: 'Monitored Repositories',
-      value: `${activeReposCount} / ${repositories.length}`,
+      value: `${activeReposCount} / ${aggregates.totalRepositories ?? 0}`,
       subtext: `${activeReposCount} active GitHub Webhooks`,
       icon: ShieldCheck,
       color: 'text-emerald-400',
@@ -25,9 +18,9 @@ export function StatsCards({ repositories, logs }: StatsCardsProps) {
       border: 'border-emerald-500/20',
     },
     {
-      title: 'Auto-Commit README',
-      value: `${autoCommitCount}`,
-      subtext: 'Auto documentation enabled',
+      title: 'Documentation proposals',
+      value: `${aggregates.pendingProposals ?? 0}`,
+      subtext: 'Awaiting human approval',
       icon: FileEdit,
       color: 'text-indigo-400',
       bg: 'bg-indigo-500/10',
@@ -36,7 +29,7 @@ export function StatsCards({ repositories, logs }: StatsCardsProps) {
     {
       title: 'AI Reviews Completed',
       value: `${successfulReviewsCount}`,
-      subtext: `${logs.length} total webhook events received`,
+      subtext: `${aggregates.totalRuns ?? 0} total processing runs`,
       icon: GitPullRequest,
       color: 'text-cyan-400',
       bg: 'bg-cyan-500/10',
@@ -44,8 +37,8 @@ export function StatsCards({ repositories, logs }: StatsCardsProps) {
     },
     {
       title: 'AI Engine',
-      value: 'Gemini 1.5 Flash',
-      subtext: 'Smart diff parsing & zero-cost setup',
+      value: String(aggregates.aiModel || 'Not configured'),
+      subtext: 'Model configured by the operator',
       icon: Sparkles,
       color: 'text-purple-400',
       bg: 'bg-purple-500/10',

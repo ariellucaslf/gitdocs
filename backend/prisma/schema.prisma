@@ -8,31 +8,135 @@ generator client {
 }
 
 model User {
-  id           String       @id @default(uuid())
-  githubId     Int          @unique
-  username     String
-  email        String?
-  avatarUrl    String?
-  accessToken  String       // GitHub Access Token
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  repositories Repository[]
+  id                String        @id @default(uuid())
+  githubId          Int           @unique
+  username          String
+  email             String?
+  avatarUrl         String?
+  accessToken       String        // Legacy plain-text token fallback
+  encryptedToken    String?       // AES-256-GCM ciphertext
+  tokenIv           String?       // Unique 96-bit initialization vector
+  tokenTag          String?       // 128-bit authentication tag
+  tokenKeyVersion   String?       // Key version identifier (e.g. 'v1')
+  tokenRevokedAt    DateTime?     // Revocation timestamp (ADR 0002)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  repositories      Repository[]
+  approvedProposals DocProposal[]
+}
+
+enum ProvisioningState {
+  DISABLED
+  PROVISIONING
+  ACTIVE
+  ERROR
 }
 
 model Repository {
-  id               String       @id @default(uuid())
-  githubRepoId     Int          @unique
-  name             String
-  fullName         String
-  owner            String
-  isActive         Boolean      @default(false)
-  autoCommitReadme Boolean      @default(false)
-  webhookId        Int?         // The registered Webhook ID on GitHub
-  userId           String
-  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  webhookLogs      WebhookLog[]
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  id                String            @id @default(uuid())
+  githubRepoId      Int               @unique
+  name              String
+  fullName          String
+  owner             String
+  isActive          Boolean           @default(false)
+  desiredActive     Boolean           @default(false)
+  provisioningState ProvisioningState @default(DISABLED)
+  lastErrorCode     String?
+  provisioningLeaseUntil DateTime?
+  provisioningVersion Int @default(0)
+  autoCommitReadme  Boolean           @default(false)
+  webhookId         Int?              // The registered Webhook ID on GitHub
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  webhookLogs       WebhookLog[]
+  webhookDeliveries WebhookDelivery[]
+  processingRuns    ProcessingRun[]
+  docProposals      DocProposal[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  RETRY_WAIT
+  SUCCESS
+  PARTIAL_SUCCESS
+  ERROR
+  SKIPPED
+  SUPERSEDED
+}
+
+enum StepStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  SKIPPED
+  ERROR
+}
+
+model WebhookDelivery {
+  id              String         @id @default(uuid())
+  deliveryId      String         @unique
+  repositoryId    String
+  repository      Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  event           String
+  action          String
+  headSha         String?
+  payloadDigest   String
+  admissionStatus String
+  admissionReason String?
+  processingRunId String?
+  processingRun   ProcessingRun? @relation(fields: [processingRunId], references: [id], onDelete: SetNull)
+  createdAt       DateTime       @default(now())
+
+  @@index([repositoryId, createdAt])
+}
+
+model ProcessingRun {
+  id              String            @id @default(uuid())
+  repositoryId    String
+  repository      Repository        @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  prNumber        Int
+  prTitle         String
+  headSha         String
+  baseRef         String?
+  status          RunStatus         @default(QUEUED)
+  attemptCount    Int               @default(0)
+  maxAttempts     Int               @default(3)
+  availableAt     DateTime          @default(now())
+  leaseOwner      String?
+  leaseUntil      DateTime?
+  leaseVersion    Int               @default(0)
+  analysisResult  Json?
+  commentBody     String?
+  lastErrorCode   String?
+  rawDiffSize     Int?
+  commentUrl      String?
+  steps           ProcessingStep[]
+  deliveries      WebhookDelivery[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([repositoryId, prNumber, headSha])
+  @@index([status, availableAt])
+  @@index([status, leaseUntil])
+}
+
+model ProcessingStep {
+  id         String        @id @default(uuid())
+  runId      String
+  run        ProcessingRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  stepName   String
+  status     StepStatus    @default(PENDING)
+  attempt    Int           @default(1)
+  externalId String?
+  error      String?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@unique([runId, stepName])
 }
 
 enum LogStatus {
@@ -53,3 +157,68 @@ model WebhookLog {
   responseCommentUrl String?    // Link to the comment created on the PR
   createdAt          DateTime   @default(now())
 }
+
+enum ProposalStatus {
+  PENDING_APPROVAL
+  APPLYING
+  APPLIED
+  REJECTED
+  STALE
+  FAILED
+}
+
+enum CommitIntentStatus {
+  PENDING
+  CONFIRMED
+  ABANDONED
+}
+
+model DocProposal {
+  id               String         @id @default(uuid())
+  repositoryId     String
+  runId            String?        @unique
+  repository       Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  prNumber         Int
+  headSha          String
+  baseFileHash     String         // SHA-256 hash of target file at headSha
+  targetPath       String         @default("README.md")
+  schemaVersion    Int            @default(1)
+  title            String
+  description      String?
+  operations       Json           // Array of { oldText: string, newText: string } or creation
+  evidence         String?
+  previewContent   String?
+  isFork           Boolean        @default(false)
+  status           ProposalStatus @default(PENDING_APPROVAL)
+  failureReason    String?
+  approvedByUserId String?
+  approvedByUser   User?          @relation(fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  approvedAt       DateTime?
+  commitSha        String?
+  commitUrl        String?
+  commitIntents    CommitIntent[]
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([repositoryId, prNumber, headSha])
+  @@index([status])
+}
+
+model CommitIntent {
+  id                  String             @id @default(uuid())
+  proposalId          String
+  proposal            DocProposal        @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  repositoryId        String
+  prNumber            Int
+  expectedParentSha   String
+  expectedContentHash String             // SHA-256 of patched content
+  status              CommitIntentStatus @default(PENDING)
+  appliedCommitSha    String?
+  preparedCommitSha   String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  @@index([repositoryId, prNumber, expectedParentSha])
+  @@index([repositoryId, appliedCommitSha])
+}
+

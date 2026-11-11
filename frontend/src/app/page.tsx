@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useSession } from 'next-auth/react';
 import { Navbar } from '@/components/Navbar';
 import { StatsCards } from '@/components/StatsCards';
@@ -21,36 +21,48 @@ export default function DashboardPage() {
 
   const [repositories, setRepositories] = useState<RepositoryItem[]>([]);
   const [logs, setLogs] = useState<WebhookLogItem[]>([]);
+  const [repoPage, setRepoPage] = useState(1);
+  const [logPage, setLogPage] = useState(1);
+  const [repoPages, setRepoPages] = useState(1);
+  const [logPages, setLogPages] = useState(1);
+  const [aggregates, setAggregates] = useState<Record<string, number | string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const requestVersion = useRef(0);
   const loadData = useCallback(async () => {
-    if (!session?.accessToken) return;
+    if (!session?.user) return;
+    const version = ++requestVersion.current;
 
     try {
       setError(null);
       const [reposData, logsData] = await Promise.all([
-        fetchRepositories(session.accessToken),
-        fetchWebhookLogs(session.accessToken).catch(() => []),
+        fetchRepositories(repoPage),
+        fetchWebhookLogs(logPage),
       ]);
 
-      setRepositories(reposData);
-      setLogs(logsData);
+      if (version !== requestVersion.current) return;
+      setRepositories(reposData.items);
+      setLogs(logsData.items);
+      setRepoPages(reposData.pagination.totalPages);
+      setLogPages(logsData.pagination.totalPages);
+      setAggregates({ ...reposData.aggregates, ...logsData.aggregates });
     } catch (err) {
       console.error('Error loading dashboard data:', err);
+      if (version !== requestVersion.current) return;
       setError(err instanceof Error ? err.message : 'Failed to connect to backend API');
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
-  }, [session?.accessToken]);
+  }, [session?.user, repoPage, logPage]);
 
   useEffect(() => {
-    if (session?.accessToken) {
+    if (session?.user) {
       loadData();
     } else if (status === 'unauthenticated') {
       setLoading(false);
     }
-  }, [session?.accessToken, status, loadData]);
+  }, [session?.user, status, loadData]);
 
   // Loading Session State
   if (status === 'loading' || (status === 'authenticated' && loading)) {
@@ -79,7 +91,7 @@ export default function DashboardPage() {
         {/* Error notification banner if API is unreachable */}
         {error && (
           <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-sm flex items-center justify-between">
-            <span>⚠️ {error}. Ensure your backend server is running on port 4000.</span>
+            <span role="alert">⚠️ {error}</span>
             <button
               onClick={loadData}
               className="px-3 py-1 bg-rose-500/20 hover:bg-rose-500/30 rounded-lg text-xs font-semibold"
@@ -90,18 +102,24 @@ export default function DashboardPage() {
         )}
 
         {/* Top Summary Stats */}
-        <StatsCards repositories={repositories} logs={logs} />
+        <StatsCards aggregates={aggregates} />
 
         {/* Tab View */}
         {activeTab === 'repositories' ? (
           <RepositoryList
             repositories={repositories}
-            token={session.accessToken || ''}
             onRefresh={loadData}
           />
         ) : (
           <WebhookLogsTable logs={logs} onRefresh={loadData} />
         )}
+        <div className="flex justify-center items-center gap-4 mt-6 text-sm text-slate-300">
+          <button className="px-3 py-2 border border-slate-700 rounded-lg disabled:opacity-40" disabled={(activeTab === 'repositories' ? repoPage : logPage) <= 1}
+            onClick={() => activeTab === 'repositories' ? setRepoPage(p => p - 1) : setLogPage(p => p - 1)}>Previous page</button>
+          <span>Page {activeTab === 'repositories' ? repoPage : logPage} of {activeTab === 'repositories' ? repoPages : logPages}</span>
+          <button className="px-3 py-2 border border-slate-700 rounded-lg disabled:opacity-40" disabled={activeTab === 'repositories' ? repoPage >= repoPages : logPage >= logPages}
+            onClick={() => activeTab === 'repositories' ? setRepoPage(p => p + 1) : setLogPage(p => p + 1)}>Next page</button>
+        </div>
       </main>
     </div>
   );

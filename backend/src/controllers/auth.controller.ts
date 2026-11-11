@@ -1,3 +1,4 @@
+import { logSafeError } from '../utils/logger.js';
 import { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../utils/response.js';
 
@@ -18,7 +19,7 @@ export class AuthController {
         createdAt: req.user.createdAt,
       });
     } catch (error) {
-      console.error('❌ AuthController.getMe error:', error);
+      logSafeError('❌ AuthController.getMe error:', error);
       sendError(res, 'Failed to fetch user profile', 500);
     }
   };

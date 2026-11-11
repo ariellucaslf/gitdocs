@@ -61,7 +61,7 @@ export function WebhookLogsTable({ logs, onRefresh }: WebhookLogsTableProps) {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search logs by PR title, repo or status..."
+            placeholder="Search this page by PR, repo or status..."
             className="w-full bg-surface-elevated/80 border border-surface-border/80 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500/60 focus:ring-1 focus:ring-emerald-500/30 transition-all"
           />
         </div>
@@ -106,17 +106,18 @@ export function WebhookLogsTable({ logs, onRefresh }: WebhookLogsTableProps) {
                     <tr key={log.id} className="hover:bg-slate-800/30 transition-colors">
                       {/* Status */}
                       <td className="py-3.5 px-4 whitespace-nowrap">
+                        {['SKIPPED', 'SUPERSEDED'].includes(log.status) && <span className="text-xs text-slate-400">{log.status}</span>}
                         {log.status === 'SUCCESS' && (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                             <CheckCircle2 className="w-3.5 h-3.5" /> Reviewed
                           </span>
                         )}
-                        {log.status === 'PENDING' && (
+                        {['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(log.status) && (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
                             <Clock className="w-3.5 h-3.5 animate-pulse" /> Processing
                           </span>
                         )}
-                        {log.status === 'ERROR' && (
+                        {['ERROR', 'PARTIAL_SUCCESS'].includes(log.status) && (
                           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20">
                             <XCircle className="w-3.5 h-3.5" /> Error
                           </span>
@@ -167,7 +168,7 @@ export function WebhookLogsTable({ logs, onRefresh }: WebhookLogsTableProps) {
                           </a>
                         )}
 
-                        {log.status === 'ERROR' && log.errorMessage && (
+                        {['ERROR', 'PARTIAL_SUCCESS'].includes(log.status) && log.errorMessage && (
                           <button
                             onClick={() => setSelectedError(log.errorMessage)}
                             className="inline-flex items-center gap-1 text-xs font-semibold text-rose-400 hover:text-rose-300 hover:underline"

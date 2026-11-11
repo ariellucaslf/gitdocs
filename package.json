@@ -8,17 +8,18 @@
     "frontend"
   ],
   "engines": {
-    "node": ">=20.17.0 <25.0.0",
+    "node": ">=24.16.0 <25.0.0",
     "npm": ">=10.0.0"
   },
   "scripts": {
     "dev:backend": "npm --workspace=backend run dev",
     "dev:frontend": "npm --workspace=frontend run dev",
+    "worker": "npm --workspace=backend run worker",
     "build:backend": "npm --workspace=backend run build",
     "build:frontend": "npm --workspace=frontend run build",
     "typecheck": "npm --workspace=backend run typecheck && npm --workspace=frontend run typecheck",
     "test": "npm --workspace=backend run test",
-    "test:integration": "npm --workspace=backend run test:integration",
+    "test:integration": "npm --workspace=backend run test:integration --",
     "db:migrate": "npm --workspace=backend run db:migrate",
     "db:migrate:deploy": "npm --workspace=backend run db:migrate:deploy",
     "db:migrate:status": "npm --workspace=backend run db:migrate:status",
@@ -36,5 +37,8 @@
     "typescript"
   ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "qs": "^6.16.1"
+  }
 }
