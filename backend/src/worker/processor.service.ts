@@ -1,6 +1,7 @@
 import { prisma } from '../config/prisma.js';
 import { githubService } from '../services/github.service.js';
 import { geminiService } from '../services/gemini.service.js';
+import { docProposalService } from '../services/docProposal.service.js';
 import { formatReviewComment } from '../utils/commentFormatter.js';
 import { queueService } from './queue.service.js';
 
@@ -158,6 +159,51 @@ export class JobProcessorService {
         where: { runId_stepName: { runId, stepName: 'AI_ANALYSIS' } },
         data: { status: 'SUCCESS', finishedAt: new Date() },
       });
+
+      // Generate DocProposal in PENDING_APPROVAL when AI suggests documentation update (ADR 0003, V17)
+      if (analysis.data.suggestedDocUpdate) {
+        try {
+          const prDetails = await githubService.getPullRequestDetails(
+            accessToken,
+            owner,
+            repoName,
+            prNumber
+          );
+
+          const isFork = prDetails?.isFork ?? false;
+          const targetPath = analysis.data.suggestedDocUpdate.targetFile || 'README.md';
+
+          const currentFile = await githubService.getFileContent(
+            accessToken,
+            owner,
+            repoName,
+            targetPath,
+            run.headSha
+          );
+
+          const originalContent = currentFile ? currentFile.content : null;
+          const operations = originalContent === null
+            ? [{ oldText: '', newText: analysis.data.suggestedDocUpdate.proposedContent }]
+            : [{ oldText: originalContent, newText: analysis.data.suggestedDocUpdate.proposedContent }];
+
+          await docProposalService.createProposal({
+            repositoryId: run.repositoryId,
+            prNumber: run.prNumber,
+            headSha: run.headSha,
+            title: analysis.data.suggestedDocUpdate.title,
+            description: analysis.data.suggestedDocUpdate.description,
+            targetPath,
+            operations,
+            evidence: analysis.data.suggestedDocUpdate.evidence,
+            isFork,
+            originalFileContent: originalContent,
+          });
+
+          console.log(`📝 [Worker] Generated documentation proposal for PR #${prNumber} (${targetPath})`);
+        } catch (proposalErr) {
+          console.warn(`⚠️ [Worker] DocProposal generation skipped for PR #${prNumber}:`, proposalErr);
+        }
+      }
 
       // Step 3: PUBLISH_COMMENT (with reconciliation check, V15)
       await prisma.processingStep.upsert({
