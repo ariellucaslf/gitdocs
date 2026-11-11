@@ -1,3 +1,4 @@
+import { logSafeError } from '../utils/logger.js';
 import { Request, Response } from 'express';
 import { docProposalService } from '../services/docProposal.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
@@ -13,12 +14,13 @@ export class ProposalController {
         return;
       }
 
-      const proposals = await docProposalService.listProposals(repositoryId, prNumber);
+      if (prNumber !== undefined && (!Number.isInteger(prNumber) || prNumber < 1)) { sendError(res, 'Invalid PR number', 400); return; }
+      const proposals = await docProposalService.listProposals(repositoryId, req.user!.id, prNumber);
       sendSuccess(res, proposals);
     } catch (error: unknown) {
-      console.error('Error listing proposals:', error);
-      const message = error instanceof Error ? error.message : 'Failed to list proposals';
-      sendError(res, message, 500);
+      logSafeError('Error listing proposals:', error);
+      const message = error && typeof error === 'object' && 'statusCode' in error && error instanceof Error ? error.message : 'Failed to list proposals';
+      sendError(res, message, error && typeof error === 'object' && 'statusCode' in error ? Number(error.statusCode) : 500);
     }
   };
 
@@ -30,7 +32,7 @@ export class ProposalController {
         return;
       }
 
-      const proposal = await docProposalService.getProposal(id);
+      const proposal = await docProposalService.getProposal(id, req.user!.id);
 
       if (!proposal) {
         sendError(res, 'Proposal not found', 404);
@@ -39,9 +41,9 @@ export class ProposalController {
 
       sendSuccess(res, proposal);
     } catch (error: unknown) {
-      console.error('Error fetching proposal:', error);
-      const message = error instanceof Error ? error.message : 'Failed to fetch proposal';
-      sendError(res, message, 500);
+      logSafeError('Error fetching proposal:', error);
+      const message = error && typeof error === 'object' && 'statusCode' in error && error instanceof Error ? error.message : 'Failed to fetch proposal';
+      sendError(res, message, error && typeof error === 'object' && 'statusCode' in error ? Number(error.statusCode) : 500);
     }
   };
 
@@ -63,7 +65,7 @@ export class ProposalController {
       const result = await docProposalService.approveProposal(id, userId);
       sendSuccess(res, result);
     } catch (error: any) {
-      console.error('Error approving proposal:', error);
+      logSafeError('Error approving proposal:', error);
       const statusCode = error.statusCode || 500;
       const message = error.message || 'Failed to approve proposal';
       sendError(res, message, statusCode);
@@ -75,6 +77,9 @@ export class ProposalController {
       const { id } = req.params;
       const userId = req.user?.id;
       const { reason } = req.body || {};
+      if (reason !== undefined && (typeof reason !== 'string' || reason.length > 1000)) {
+        sendError(res, 'Invalid rejection reason', 400); return;
+      }
 
       if (!id) {
         sendError(res, 'Proposal ID is required', 400);
@@ -89,7 +94,7 @@ export class ProposalController {
       const updated = await docProposalService.rejectProposal(id, userId, reason);
       sendSuccess(res, updated);
     } catch (error: any) {
-      console.error('Error rejecting proposal:', error);
+      logSafeError('Error rejecting proposal:', error);
       const statusCode = error.statusCode || 500;
       const message = error.message || 'Failed to reject proposal';
       sendError(res, message, statusCode);

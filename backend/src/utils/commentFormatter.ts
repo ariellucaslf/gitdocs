@@ -65,7 +65,7 @@ export function formatReviewComment(options: {
     comment += `### 📝 Documentation Suggestion (Proposed)\n\n`;
     comment += `**Target:** \`${doc.targetFile}\` — *${doc.title}*\n\n`;
     comment += `${doc.description}\n\n`;
-    comment += `\`\`\`markdown\n${doc.proposedContent}\n\`\`\`\n\n`;
+    comment += `\`\`\`markdown\n${doc.operations.map(op => `Replace:\n${op.oldText}\nWith:\n${op.newText}`).join('\n\n')}\n\`\`\`\n\n`;
     comment += `> 💡 *To apply this suggestion to \`${doc.targetFile}\`, visit the GitDocs dashboard to review and approve the proposal.*\n\n`;
   }
 
