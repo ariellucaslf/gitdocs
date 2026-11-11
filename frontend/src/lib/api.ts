@@ -19,6 +19,9 @@ export interface RepositoryItem {
   isActive: boolean;
   autoCommitReadme: boolean;
   webhookId: number | null;
+  provisioningState?: 'DISABLED' | 'PROVISIONING' | 'ACTIVE' | 'ERROR';
+  desiredActive?: boolean;
+  lastErrorCode?: string | null;
 }
 
 export interface WebhookLogItem {
@@ -26,7 +29,7 @@ export interface WebhookLogItem {
   repositoryId: string;
   prNumber: number;
   prTitle: string;
-  status: 'PENDING' | 'SUCCESS' | 'ERROR';
+  status: 'QUEUED' | 'RUNNING' | 'RETRY_WAIT' | 'SUCCESS' | 'PARTIAL_SUCCESS' | 'ERROR' | 'SKIPPED' | 'SUPERSEDED';
   rawDiffSize: number;
   errorMessage: string | null;
   responseCommentUrl: string | null;
@@ -47,60 +50,35 @@ export interface ToggleRepoPayload {
   autoCommitReadme?: boolean;
 }
 
-export async function fetchRepositories(_token?: string): Promise<RepositoryItem[]> {
-  const res = await fetch(`${BFF_BASE_URL}/repositories`, {
+export interface PageData<T> {
+  items: T[];
+  pagination: { page: number; limit: number; total: number; totalPages: number };
+  aggregates: Record<string, number | string>;
+}
+
+async function api<T>(path: string, body?: object): Promise<T> {
+  const res = await fetch(`${BFF_BASE_URL}/${path}`, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
     cache: 'no-store',
   });
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch repositories: ${res.statusText}`);
-  }
-
   const json = await res.json();
-  if (!json.success) {
-    throw new Error(json.error || 'Failed to fetch repositories');
-  }
-
-  return Array.isArray(json.data) ? json.data : json.data.items || [];
+  if (!res.ok || !json.success) throw new Error(json.error || `Request failed (${res.status})`);
+  return json.data;
 }
-
-export async function toggleRepository(
-  tokenOrPayload: string | ToggleRepoPayload,
-  optionalPayload?: ToggleRepoPayload
-): Promise<void> {
-  const payload = (typeof tokenOrPayload === 'string' ? optionalPayload : tokenOrPayload) as ToggleRepoPayload;
-
-  const res = await fetch(`${BFF_BASE_URL}/repositories/toggle`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Failed to toggle repository: ${res.statusText}`);
-  }
-
-  const json: ApiResponse<unknown> = await res.json();
-  if (!json.success) {
-    throw new Error(json.error || 'Failed to toggle repository');
-  }
+export function fetchRepositories(page = 1): Promise<PageData<RepositoryItem>> {
+  return api(`repositories?page=${page}&limit=24`);
 }
-
-export async function fetchWebhookLogs(_token?: string): Promise<WebhookLogItem[]> {
-  const res = await fetch(`${BFF_BASE_URL}/webhooks/logs`, {
-    cache: 'no-store',
-  });
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch logs: ${res.statusText}`);
-  }
-
-  const json = await res.json();
-  if (!json.success) {
-    throw new Error(json.error || 'Failed to fetch logs');
-  }
-
-  return Array.isArray(json.data) ? json.data : json.data.items || [];
+export function fetchWebhookLogs(page = 1): Promise<PageData<WebhookLogItem>> {
+  return api(`webhooks/logs?page=${page}&limit=25`);
 }
+export function toggleRepository(payload: ToggleRepoPayload): Promise<void> { return api('repositories/toggle', payload); }
+export interface DocProposal {
+  id: string; prNumber: number; title: string; description?: string; headSha: string; previewContent: string;
+  operations: { oldText: string; newText: string }[]; isFork: boolean;
+  status: 'PENDING_APPROVAL' | 'APPLYING' | 'APPLIED' | 'REJECTED' | 'STALE' | 'FAILED';
+  failureReason?: string; commitUrl?: string;
+}
+export function fetchProposals(repositoryId: string): Promise<DocProposal[]> { return api(`repositories/${repositoryId}/proposals`); }
+export function actOnProposal(id: string, action: 'approve' | 'reject'): Promise<unknown> { return api(`proposals/${id}/${action}`, {}); }
