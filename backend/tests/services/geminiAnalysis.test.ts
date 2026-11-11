@@ -209,7 +209,7 @@ diff --git a/src/index.ts b/src/index.ts
           title: 'Document Rate Limiting',
           targetFile: 'README.md',
           description: 'Added RATE_LIMIT env var.',
-          proposedContent: '### Rate Limiting\nConfigured via `RATE_LIMIT`.',
+          operations: [{ oldText: 'Setup', newText: '### Rate Limiting\nConfigured via `RATE_LIMIT`.' }],
           evidence: 'env.ts addition',
         },
       };
