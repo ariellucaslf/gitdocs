@@ -14,18 +14,27 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, account, profile }) {
-      if (account && account.access_token) {
-        token.accessToken = account.access_token;
+    async jwt({ token, account }) {
+      if (account?.access_token) {
+        // Provision credentials while they are available on the OAuth server callback.
+        // The resulting JWT contains identity only, never the GitHub token.
+        const backend = process.env.BACKEND_INTERNAL_URL || 'http://localhost:4000/api';
+        const response = await fetch(`${backend}/auth/me`, {
+          headers: { Authorization: `Bearer ${account.access_token}` },
+          cache: 'no-store',
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!response.ok) throw new Error('Unable to connect GitHub account to GitDocs');
+        const result = await response.json();
+        if (!result.success || !result.data?.id) throw new Error('Invalid account provisioning response');
+        token.sub = result.data.id;
+        token.githubId = result.data.githubId;
+        token.username = result.data.username;
+        token.identityVersion = 2;
       }
-      if (profile && typeof profile === 'object') {
-        if ('login' in profile) {
-          token.username = profile.login as string;
-        }
-        if ('id' in profile) {
-          token.githubId = profile.id as number;
-        }
-      }
+      delete token.accessToken;
+      // Sessions predating the server-only identity exchange must sign in again.
+      if (token.identityVersion !== 2) return {};
       return token;
     },
     async session({ session, token }) {
