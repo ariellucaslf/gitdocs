@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { Repository } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 import { githubService } from '../services/github.service.js';
+import { resolveUserAccessToken } from '../services/crypto.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
 import { env } from '../config/env.js';
 
@@ -23,7 +24,8 @@ export class RepositoryController {
         return;
       }
 
-      const ghRepos = await githubService.listUserRepositories(req.user.accessToken);
+      const accessToken = resolveUserAccessToken(req.user);
+      const ghRepos = await githubService.listUserRepositories(accessToken);
       const dbRepos: Repository[] = await prisma.repository.findMany({
         where: { userId: req.user.id },
       });
@@ -81,10 +83,12 @@ export class RepositoryController {
         return;
       }
 
+      const accessToken = resolveUserAccessToken(req.user);
+
       // 2. Fetch canonical repository metadata and verify permissions on GitHub (A01 / V02)
       let ghRepo;
       try {
-        ghRepo = await githubService.getRepositoryById(req.user.accessToken, githubRepoId);
+        ghRepo = await githubService.getRepositoryById(accessToken, githubRepoId);
       } catch (ghError) {
         console.error(`Failed to verify repository ${githubRepoId} on GitHub:`, ghError);
         sendError(res, 'Repository not found on GitHub or inaccessible', 404);
@@ -139,7 +143,7 @@ export class RepositoryController {
         // Provision webhook on GitHub
         try {
           const webhookId = await githubService.createRepositoryWebhook(
-            req.user.accessToken,
+            accessToken,
             canonicalOwner,
             canonicalName,
             webhookUrl
@@ -199,7 +203,7 @@ export class RepositoryController {
       if (existing.webhookId) {
         try {
           await githubService.deleteRepositoryWebhook(
-            req.user.accessToken,
+            accessToken,
             canonicalOwner,
             canonicalName,
             existing.webhookId
