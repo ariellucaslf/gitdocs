@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "GitDocs & PR-Committer - Next.js 14 Dashboard",
   "private": true,
+  "engines": {
+    "node": ">=20.17.0 <25.0.0",
+    "npm": ">=10.0.0"
+  },
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
