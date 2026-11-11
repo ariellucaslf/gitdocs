@@ -27,6 +27,14 @@ vi.mock('../../src/config/prisma.js', () => ({
     processingStep: {
       create: vi.fn().mockResolvedValue({}),
     },
+    commitIntent: {
+      findFirst: vi.fn().mockResolvedValue(null),
+      create: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
+    docProposal: {
+      update: vi.fn().mockResolvedValue({}),
+    },
   },
 }));
 

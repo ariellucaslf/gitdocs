@@ -38,6 +38,15 @@ vi.mock('../../src/config/prisma.js', () => ({
       create: vi.fn().mockResolvedValue({}),
       update: vi.fn().mockResolvedValue({}),
     },
+    commitIntent: {
+      findFirst: vi.fn().mockResolvedValue(null),
+      create: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
+    docProposal: {
+      create: vi.fn().mockResolvedValue({}),
+      update: vi.fn().mockResolvedValue({}),
+    },
   },
 }));
 
@@ -47,6 +56,8 @@ vi.mock('../../src/services/github.service.js', () => ({
     getPullRequestDiff: vi.fn(),
     findPullRequestComment: vi.fn(),
     postPullRequestComment: vi.fn(),
+    getPullRequestDetails: vi.fn(),
+    getFileContent: vi.fn(),
   },
 }));
 
