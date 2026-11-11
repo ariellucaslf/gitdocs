@@ -1,3 +1,4 @@
+import { logSafeError } from './utils/logger.js';
 import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { mainRouter } from './routes/index.js';
@@ -53,13 +54,12 @@ app.get('/health/readiness', async (_req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
       service: 'gitdocs-backend',
     });
-  } catch (dbError: unknown) {
-    const errorMsg = dbError instanceof Error ? dbError.message : 'Database unreachable';
+  } catch {
     return res.status(503).json({
       success: false,
       status: 'not_ready',
       database: 'disconnected',
-      error: errorMsg,
+      error: 'Database unavailable',
       timestamp: new Date().toISOString(),
     });
   }
@@ -83,7 +83,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     return sendError(res, 'Malformed JSON payload', 400);
   }
 
-  console.error('💥 Unhandled Exception:', err);
+  logSafeError('💥 Unhandled Exception:', err);
   return sendError(res, 'Internal Server Error', 500);
 });
 

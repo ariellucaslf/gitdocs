@@ -107,3 +107,13 @@ export class Logger {
 }
 
 export const logger = new Logger('gitdocs-backend');
+
+// Provider errors can contain request headers or source bodies. Log only safe classification.
+export function logSafeError(message: string, error: unknown, context: LogContext = {}): void {
+  const candidate = error as { code?: unknown; status?: unknown } | null;
+  logger.error(message, {
+    ...context,
+    code: typeof candidate?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(candidate.code) ? candidate.code : 'UNCLASSIFIED',
+    status: typeof candidate?.status === 'number' ? candidate.status : undefined,
+  });
+}
