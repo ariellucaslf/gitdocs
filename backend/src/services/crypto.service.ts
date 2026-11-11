@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { env } from '../config/env.js';
+import { z } from 'zod';
 
 export interface EncryptedPayload {
   ciphertext: string;
@@ -196,9 +197,15 @@ export class CryptoService {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    if (payload.exp <= now) {
+    if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || payload.exp <= now) {
       throw new Error('Assertion token expired');
     }
+
+    if (!Number.isInteger(payload.iat) || payload.iat > now + 5 || payload.exp - payload.iat > 120 || payload.exp <= payload.iat) {
+      throw new Error('Invalid assertion lifetime');
+    }
+
+    z.object({ sub: z.string().min(1), ghId: z.number().int().positive(), username: z.string().min(1) }).parse(payload);
 
     if (!payload.sub || !payload.ghId) {
       throw new Error('Assertion missing required subject or githubId claims');

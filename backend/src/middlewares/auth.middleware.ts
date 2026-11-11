@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { Octokit } from '@octokit/rest';
+import { githubService } from '../services/github.service.js';
 import { prisma } from '../config/prisma.js';
 import { cryptoService } from '../services/crypto.service.js';
 import { sendError } from '../utils/response.js';
@@ -27,36 +27,19 @@ export const authMiddleware = async (
       let assertion;
       try {
         assertion = cryptoService.verifyInternalAssertion(token);
-      } catch (assertionErr: any) {
-        console.warn(`[AuthMiddleware] Rejected invalid assertion: ${assertionErr?.message}`);
-        sendError(res, `Unauthorized: ${assertionErr?.message || 'Invalid assertion'}`, 401);
+      } catch (assertionErr: unknown) {
+        console.warn(`[AuthMiddleware] Rejected invalid assertion: ${(assertionErr instanceof Error ? assertionErr.message : 'Invalid assertion')}`);
+        sendError(res, `Unauthorized: ${(assertionErr instanceof Error ? assertionErr.message : 'Invalid assertion') || 'Invalid assertion'}`, 401);
         return;
       }
 
-      // Find user by subject ID or GitHub ID
-      let user = await prisma.user.findFirst({
-        where: {
-          OR: [
-            { id: assertion.sub },
-            { githubId: assertion.ghId },
-          ],
-        },
+      // Both claims must identify the same provisioned user. Assertions never create credentials.
+      const user = await prisma.user.findFirst({
+        where: { id: assertion.sub, githubId: assertion.ghId },
       });
-
       if (!user) {
-        // Upsert user if first time accessing API via BFF
-        user = await prisma.user.upsert({
-          where: { githubId: assertion.ghId },
-          update: {
-            username: assertion.username,
-          },
-          create: {
-            id: assertion.sub,
-            githubId: assertion.ghId,
-            username: assertion.username,
-            accessToken: '', // No plain text token provided in assertion
-          },
-        });
+        sendError(res, 'Unauthorized: Reconnect your GitHub account', 401);
+        return;
       }
 
       // Check if credentials have been revoked (V22)
@@ -70,9 +53,14 @@ export const authMiddleware = async (
       return;
     }
 
-    // 2. Direct GitHub Token (Development / Integration Fallback)
-    const octokit = new Octokit({ auth: token });
-    const { data: ghUser } = await octokit.rest.users.getAuthenticated();
+    // OAuth bootstrap is server-to-server. All other API traffic requires an assertion.
+    if (req.originalUrl.split('?')[0] !== '/api/auth/me' || req.method !== 'GET') {
+      sendError(res, 'Unauthorized: Internal assertion required', 401);
+      return;
+    }
+
+    // Validate the OAuth credential with GitHub before provisioning the user.
+    const ghUser = await githubService.getAuthenticatedUser(token);
 
     if (!ghUser || !ghUser.id) {
       sendError(res, 'Failed to authenticate with GitHub', 401);
@@ -88,7 +76,7 @@ export const authMiddleware = async (
         username: ghUser.login,
         email: ghUser.email ?? null,
         avatarUrl: ghUser.avatar_url ?? null,
-        accessToken: token, // Legacy field fallback
+        accessToken: '', // Never persist the plaintext OAuth credential
         encryptedToken: encrypted.ciphertext,
         tokenIv: encrypted.iv,
         tokenTag: encrypted.tag,
@@ -100,7 +88,7 @@ export const authMiddleware = async (
         username: ghUser.login,
         email: ghUser.email ?? null,
         avatarUrl: ghUser.avatar_url ?? null,
-        accessToken: token,
+        accessToken: '',
         encryptedToken: encrypted.ciphertext,
         tokenIv: encrypted.iv,
         tokenTag: encrypted.tag,
