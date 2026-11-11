@@ -232,26 +232,50 @@ export class WebhookController {
         return;
       }
 
-      const logs = await prisma.webhookLog.findMany({
-        where: {
-          repository: {
-            userId: req.user.id,
-          },
+      const page = req.query.page ? Math.max(1, Number(req.query.page)) : 1;
+      const limit = req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50;
+      const skip = (page - 1) * limit;
+
+      const whereClause: any = {
+        repository: {
+          userId: req.user.id,
         },
-        orderBy: { createdAt: 'desc' },
-        take: 50,
-        include: {
-          repository: {
-            select: {
-              name: true,
-              fullName: true,
-              owner: true,
+      };
+
+      if (req.query.status && typeof req.query.status === 'string') {
+        whereClause.status = req.query.status;
+      }
+
+      const [total, logs] = await Promise.all([
+        prisma.webhookLog.count({ where: whereClause }),
+        prisma.webhookLog.findMany({
+          where: whereClause,
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+          include: {
+            repository: {
+              select: {
+                name: true,
+                fullName: true,
+                owner: true,
+              },
             },
           },
+        }),
+      ]);
+
+      const totalPages = Math.ceil(total / limit) || 1;
+
+      sendSuccess(res, {
+        items: logs,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
         },
       });
-
-      sendSuccess(res, logs);
     } catch (error) {
       console.error('❌ WebhookController.listLogs error:', error);
       sendError(res, 'Failed to fetch webhook logs', 500);

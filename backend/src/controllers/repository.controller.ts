@@ -46,7 +46,45 @@ export class RepositoryController {
         };
       });
 
-      sendSuccess(res, combined);
+      const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : '';
+      const filter = req.query.filter as 'all' | 'active' | 'inactive' | undefined;
+      const page = req.query.page ? Math.max(1, Number(req.query.page)) : 1;
+      const limit = req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50;
+      const skip = (page - 1) * limit;
+
+      let filtered = combined;
+      if (search) {
+        filtered = filtered.filter(
+          (r) => r.name.toLowerCase().includes(search) || r.fullName.toLowerCase().includes(search)
+        );
+      }
+      if (filter === 'active') {
+        filtered = filtered.filter((r) => r.isActive);
+      } else if (filter === 'inactive') {
+        filtered = filtered.filter((r) => !r.isActive);
+      }
+
+      const total = filtered.length;
+      const paginatedItems = filtered.slice(skip, skip + limit);
+      const totalPages = Math.ceil(total / limit) || 1;
+
+      // Real aggregates calculation (ADR 0001, V23)
+      const aggregates = {
+        totalRepositories: ghRepos.length,
+        activeRepositories: dbRepos.filter((r) => r.isActive).length,
+        errorRepositories: dbRepos.filter((r) => r.provisioningState === 'ERROR').length,
+      };
+
+      sendSuccess(res, {
+        items: paginatedItems,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+        },
+        aggregates,
+      });
     } catch (error) {
       console.error('❌ RepositoryController.list error:', error);
       sendError(res, 'Failed to fetch repositories', 500);
