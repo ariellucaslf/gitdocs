@@ -13,7 +13,12 @@ model User {
   username          String
   email             String?
   avatarUrl         String?
-  accessToken       String        // GitHub Access Token
+  accessToken       String        // Legacy plain-text token fallback
+  encryptedToken    String?       // AES-256-GCM ciphertext
+  tokenIv           String?       // Unique 96-bit initialization vector
+  tokenTag          String?       // 128-bit authentication tag
+  tokenKeyVersion   String?       // Key version identifier (e.g. 'v1')
+  tokenRevokedAt    DateTime?     // Revocation timestamp (ADR 0002)
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
   repositories      Repository[]
