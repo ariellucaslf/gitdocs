@@ -1,7 +1,8 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { fileURLToPath } from 'node:url';
 
-dotenv.config();
+dotenv.config({ path: fileURLToPath(new URL('../../.env', import.meta.url)) });
 
 const envSchema = z
   .object({
@@ -13,23 +14,24 @@ const envSchema = z
     GITHUB_WEBHOOK_URL: z.string().default(''),
     CORS_ORIGIN: z.string().default('http://localhost:3000'),
     GEMINI_API_KEY: z.string().default(''),
-    GEMINI_MODEL: z.string().default('gemini-2.5-flash'),
-    GEMINI_TIMEOUT_MS: z.coerce.number().default(60000),
-    INTERNAL_AUTH_SECRET: z.string().default('gitdocs-internal-auth-secret-change-in-production'),
-    ENCRYPTION_KEY: z.string().default('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
-    ENCRYPTION_KEY_PREVIOUS: z.string().optional(),
+    GEMINI_MODEL: z.string().default(''),
+    GEMINI_TIMEOUT_MS: z.coerce.number().int().positive().max(90000).default(60000),
+    INTERNAL_AUTH_SECRET: z.string().min(32),
+    ENCRYPTION_KEY: z.string().regex(/^[a-fA-F0-9]{64}$/, 'Expected a random 32-byte hex key'),
+    ENCRYPTION_KEY_PREVIOUS: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
     ENCRYPTION_KEY_VERSION: z.string().default('v1'),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   })
   .refine(
     (data) => {
-      if (data.NODE_ENV === 'production' && data.GITHUB_WEBHOOK_URL) {
-        return data.GITHUB_WEBHOOK_URL.startsWith('https://');
-      }
-      return true;
+      if (!data.GITHUB_WEBHOOK_URL) return true;
+      try {
+        const url = new URL(data.GITHUB_WEBHOOK_URL);
+        return url.protocol === 'https:' && !url.username && !url.password && !url.hash && !!data.GITHUB_WEBHOOK_SECRET;
+      } catch { return false; }
     },
     {
-      message: 'GITHUB_WEBHOOK_URL must use HTTPS in production environments',
+      message: 'Webhook URL must be HTTPS without credentials/fragment and requires a webhook secret',
       path: ['GITHUB_WEBHOOK_URL'],
     }
   );
