@@ -1,5 +1,6 @@
 import { Octokit } from '@octokit/rest';
 import { env } from '../config/env.js';
+import { isUtf8 } from 'node:buffer';
 
 export interface GitHubRepositoryItem {
   id: number;
@@ -14,12 +15,17 @@ export interface GitHubRepositoryItem {
 
 export class GitHubService {
   private getOctokit(accessToken: string): Octokit {
-    return new Octokit({ auth: accessToken });
+    return new Octokit({ auth: accessToken, request: { timeout: 20000 } });
+  }
+
+  async getAuthenticatedUser(accessToken: string) {
+    const { data } = await this.getOctokit(accessToken).rest.users.getAuthenticated();
+    return data;
   }
 
   async listUserRepositories(accessToken: string): Promise<GitHubRepositoryItem[]> {
     const octokit = this.getOctokit(accessToken);
-    const { data } = await octokit.rest.repos.listForAuthenticatedUser({
+    const data = await octokit.paginate(octokit.rest.repos.listForAuthenticatedUser, {
       sort: 'updated',
       direction: 'desc',
       per_page: 100,
@@ -53,7 +59,7 @@ export class GitHubService {
     };
   }> {
     const octokit = this.getOctokit(accessToken);
-    const { data } = await octokit.request('GET /repositories/:id', { id: repoId });
+    const { data } = await octokit.request('GET /repositories/{repository_id}', { repository_id: repoId });
     return {
       id: data.id,
       name: data.name,
@@ -69,23 +75,11 @@ export class GitHubService {
     repo: string,
     webhookUrl: string
   ): Promise<number | null> {
-    try {
-      const octokit = this.getOctokit(accessToken);
-      const { data: hooks } = await octokit.rest.repos.listWebhooks({
-        owner,
-        repo,
-        per_page: 100,
-      });
-
-      const matchingHook = hooks.find(
-        (h) => h.config && h.config.url && h.config.url.toLowerCase() === webhookUrl.toLowerCase()
-      );
-
-      return matchingHook ? matchingHook.id : null;
-    } catch (error) {
-      console.warn(`Could not list webhooks for ${owner}/${repo}:`, error);
-      return null;
-    }
+    const octokit = this.getOctokit(accessToken);
+    const hooks = await octokit.paginate(octokit.rest.repos.listWebhooks, { owner, repo, per_page: 100 });
+    const matches = hooks.filter(hook => hook.config?.url === webhookUrl);
+    if (matches.length > 1) throw new Error('AMBIGUOUS_WEBHOOK_CONFIGURATION');
+    return matches[0]?.id ?? null;
   }
 
   async createRepositoryWebhook(
@@ -97,6 +91,11 @@ export class GitHubService {
     // Reconcile: Check if webhook already exists before attempting creation
     const existingHookId = await this.findRepositoryWebhook(accessToken, owner, repo, webhookUrl);
     if (existingHookId) {
+      // Reconfirm active state, event subscription, and current HMAC secret.
+      await this.getOctokit(accessToken).rest.repos.updateWebhook({
+        owner, repo, hook_id: existingHookId, active: true, events: ['pull_request'],
+        config: { url: webhookUrl, content_type: 'json', secret: env.GITHUB_WEBHOOK_SECRET, insecure_ssl: '0' },
+      });
       return existingHookId;
     }
 
@@ -185,21 +184,13 @@ export class GitHubService {
     pullNumber: number,
     marker: string
   ): Promise<string | null> {
-    try {
-      const octokit = this.getOctokit(accessToken);
-      const { data: comments } = await octokit.rest.issues.listComments({
-        owner,
-        repo,
-        issue_number: pullNumber,
-        per_page: 100,
-      });
-
-      const matching = comments.find((c) => c.body && c.body.includes(marker));
-      return matching ? matching.html_url : null;
-    } catch (err) {
-      console.warn(`Could not list comments for PR #${pullNumber}:`, err);
-      return null;
-    }
+    const octokit = this.getOctokit(accessToken);
+    const [{ data: user }, comments] = await Promise.all([
+      octokit.rest.users.getAuthenticated(),
+      octokit.paginate(octokit.rest.issues.listComments, { owner, repo, issue_number: pullNumber, per_page: 100 }),
+    ]);
+    const matching = comments.find(comment => comment.user?.id === user.id && comment.body?.includes(marker));
+    return matching?.html_url ?? null;
   }
 
   async getPullRequestHeadSha(
@@ -208,22 +199,8 @@ export class GitHubService {
     repo: string,
     pullNumber: number
   ): Promise<{ headSha: string; state: string } | null> {
-    try {
-      const octokit = this.getOctokit(accessToken);
-      const { data: pr } = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: pullNumber,
-      });
-
-      return {
-        headSha: pr.head.sha,
-        state: pr.state,
-      };
-    } catch (err) {
-      console.warn(`Could not fetch PR #${pullNumber} head SHA:`, err);
-      return null;
-    }
+    const details = await this.getPullRequestDetails(accessToken, owner, repo, pullNumber);
+    return details ? { headSha: details.headSha, state: details.state } : null;
   }
 
   async getFileContent(
@@ -233,30 +210,18 @@ export class GitHubService {
     path: string,
     ref: string
   ): Promise<{ content: string; sha: string } | null> {
-    try {
-      const octokit = this.getOctokit(accessToken);
-      const response = await octokit.rest.repos.getContent({
-        owner,
-        repo,
-        path,
-        ref,
-      });
-
-      if ('content' in response.data && typeof response.data.content === 'string') {
-        const decoded = Buffer.from(response.data.content, 'base64').toString('utf8');
-        return {
-          content: decoded,
-          sha: response.data.sha,
-        };
-      }
-      return null;
-    } catch (err: unknown) {
-      const error = err as { status?: number };
-      if (error?.status === 404) {
-        return null;
-      }
-      throw err;
-    }
+    if (path !== 'README.md') throw new Error('INVALID_TARGET_PATH');
+    const octokit = this.getOctokit(accessToken);
+    const { data: commit } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: ref });
+    const { data: tree } = await octokit.rest.git.getTree({ owner, repo, tree_sha: commit.tree.sha });
+    const entry = tree.tree.find(item => item.path === path);
+    if (!entry) return null;
+    if (entry.mode !== '100644' || entry.type !== 'blob' || (entry.size ?? 0) > 65536) throw new Error('UNSUPPORTED_README_FILE');
+    const { data: blob } = await octokit.rest.git.getBlob({ owner, repo, file_sha: entry.sha! });
+    if (blob.encoding !== 'base64') throw new Error('UNSUPPORTED_README_ENCODING');
+    const bytes = Buffer.from(blob.content, 'base64');
+    if (bytes.length > 65536 || !isUtf8(bytes) || bytes.includes(0)) throw new Error('UNSUPPORTED_README_CONTENT');
+    return { content: bytes.toString('utf8'), sha: entry.sha! };
   }
 
   async getPullRequestDetails(
@@ -273,31 +238,33 @@ export class GitHubService {
     headRepoFullName: string;
     baseRepoFullName: string;
   } | null> {
-    try {
-      const octokit = this.getOctokit(accessToken);
-      const { data: pr } = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: pullNumber,
-      });
+    const { data: pr } = await this.getOctokit(accessToken).rest.pulls.get({ owner, repo, pull_number: pullNumber });
+    return {
+      headSha: pr.head.sha, headRef: pr.head.ref, baseRef: pr.base.ref, state: pr.state,
+      isFork: !pr.head.repo || pr.head.repo.id !== pr.base.repo.id,
+      headRepoFullName: pr.head.repo?.full_name ?? '', baseRepoFullName: pr.base.repo.full_name,
+    };
+  }
 
-      const headRepoFullName = pr.head.repo ? pr.head.repo.full_name : `${owner}/${repo}`;
-      const baseRepoFullName = pr.base.repo ? pr.base.repo.full_name : `${owner}/${repo}`;
-      const isFork = headRepoFullName.toLowerCase() !== baseRepoFullName.toLowerCase();
+  async verifyDocCommit(accessToken: string, owner: string, repo: string, sha: string,
+    intent: { id: string; expectedParentSha: string; expectedContentHash: string; preparedCommitSha?: string | null }): Promise<boolean> {
+    const { data: commit } = await this.getOctokit(accessToken).rest.git.getCommit({ owner, repo, commit_sha: sha });
+    if (commit.parents.length !== 1 || commit.parents[0]?.sha !== intent.expectedParentSha) return false;
+    if (!commit.message.includes(`Intent-ID: ${intent.id}`)) return false;
+    if (intent.preparedCommitSha && intent.preparedCommitSha !== sha) return false;
+    const file = await this.getFileContent(accessToken, owner, repo, 'README.md', sha);
+    const { createHash } = await import('node:crypto');
+    return !!file && createHash('sha256').update(file.content).digest('hex') === intent.expectedContentHash;
+  }
 
-      return {
-        headSha: pr.head.sha,
-        headRef: pr.head.ref,
-        baseRef: pr.base.ref,
-        state: pr.state,
-        isFork,
-        headRepoFullName,
-        baseRepoFullName,
-      };
-    } catch (err) {
-      console.warn(`Could not fetch PR #${pullNumber} details:`, err);
-      return null;
-    }
+  async publishPreparedCommit(accessToken: string, owner: string, repo: string, branch: string, sha: string): Promise<void> {
+    await this.getOctokit(accessToken).rest.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha, force: false });
+  }
+
+  async isCommitInHistory(accessToken: string, owner: string, repo: string, ancestor: string, head: string): Promise<boolean> {
+    if (ancestor === head) return true;
+    const { data } = await this.getOctokit(accessToken).rest.repos.compareCommitsWithBasehead({ owner, repo, basehead: `${ancestor}...${head}` });
+    return data.merge_base_commit.sha === ancestor && ['ahead', 'identical'].includes(data.status);
   }
 
   async createDocCommit(
@@ -308,7 +275,8 @@ export class GitHubService {
     parentCommitSha: string,
     filePath: string,
     content: string,
-    commitMessage: string
+    commitMessage: string,
+    onPrepared?: (sha: string) => Promise<void>
   ): Promise<{ commitSha: string; commitUrl: string }> {
     const octokit = this.getOctokit(accessToken);
 
@@ -352,6 +320,9 @@ export class GitHubService {
       tree: tree.sha,
       parents: [parentCommitSha],
     });
+
+    // Persist the exact commit before publishing. An ambiguous update can then be reconciled.
+    if (onPrepared) await onPrepared(commit.sha);
 
     // 5. Update branch ref without force (fails if branch moved, ensuring safe non-force update)
     const cleanBranch = branch.replace(/^refs\/heads\//, '');
