@@ -8,15 +8,16 @@ generator client {
 }
 
 model User {
-  id           String       @id @default(uuid())
-  githubId     Int          @unique
-  username     String
-  email        String?
-  avatarUrl    String?
-  accessToken  String       // GitHub Access Token
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  repositories Repository[]
+  id                String        @id @default(uuid())
+  githubId          Int           @unique
+  username          String
+  email             String?
+  avatarUrl         String?
+  accessToken       String        // GitHub Access Token
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  repositories      Repository[]
+  approvedProposals DocProposal[]
 }
 
 enum ProvisioningState {
@@ -43,6 +44,7 @@ model Repository {
   webhookLogs       WebhookLog[]
   webhookDeliveries WebhookDelivery[]
   processingRuns    ProcessingRun[]
+  docProposals      DocProposal[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 }
@@ -144,3 +146,66 @@ model WebhookLog {
   responseCommentUrl String?    // Link to the comment created on the PR
   createdAt          DateTime   @default(now())
 }
+
+enum ProposalStatus {
+  PENDING_APPROVAL
+  APPLYING
+  APPLIED
+  REJECTED
+  STALE
+  FAILED
+}
+
+enum CommitIntentStatus {
+  PENDING
+  CONFIRMED
+  ABANDONED
+}
+
+model DocProposal {
+  id               String         @id @default(uuid())
+  repositoryId     String
+  repository       Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  prNumber         Int
+  headSha          String
+  baseFileHash     String         // SHA-256 hash of target file at headSha
+  targetPath       String         @default("README.md")
+  schemaVersion    Int            @default(1)
+  title            String
+  description      String?
+  operations       Json           // Array of { oldText: string, newText: string } or creation
+  evidence         String?
+  previewContent   String?
+  isFork           Boolean        @default(false)
+  status           ProposalStatus @default(PENDING_APPROVAL)
+  failureReason    String?
+  approvedByUserId String?
+  approvedByUser   User?          @relation(fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  approvedAt       DateTime?
+  commitSha        String?
+  commitUrl        String?
+  commitIntents    CommitIntent[]
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([repositoryId, prNumber, headSha])
+  @@index([status])
+}
+
+model CommitIntent {
+  id                  String             @id @default(uuid())
+  proposalId          String
+  proposal            DocProposal        @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  repositoryId        String
+  prNumber            Int
+  expectedParentSha   String
+  expectedContentHash String             // SHA-256 of patched content
+  status              CommitIntentStatus @default(PENDING)
+  appliedCommitSha    String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  @@index([repositoryId, prNumber, expectedParentSha])
+  @@index([repositoryId, appliedCommitSha])
+}
+
