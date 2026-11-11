@@ -226,6 +226,149 @@ export class GitHubService {
     }
   }
 
+  async getFileContent(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    path: string,
+    ref: string
+  ): Promise<{ content: string; sha: string } | null> {
+    try {
+      const octokit = this.getOctokit(accessToken);
+      const response = await octokit.rest.repos.getContent({
+        owner,
+        repo,
+        path,
+        ref,
+      });
+
+      if ('content' in response.data && typeof response.data.content === 'string') {
+        const decoded = Buffer.from(response.data.content, 'base64').toString('utf8');
+        return {
+          content: decoded,
+          sha: response.data.sha,
+        };
+      }
+      return null;
+    } catch (err: unknown) {
+      const error = err as { status?: number };
+      if (error?.status === 404) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  async getPullRequestDetails(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    pullNumber: number
+  ): Promise<{
+    headSha: string;
+    headRef: string;
+    baseRef: string;
+    state: string;
+    isFork: boolean;
+    headRepoFullName: string;
+    baseRepoFullName: string;
+  } | null> {
+    try {
+      const octokit = this.getOctokit(accessToken);
+      const { data: pr } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: pullNumber,
+      });
+
+      const headRepoFullName = pr.head.repo ? pr.head.repo.full_name : `${owner}/${repo}`;
+      const baseRepoFullName = pr.base.repo ? pr.base.repo.full_name : `${owner}/${repo}`;
+      const isFork = headRepoFullName.toLowerCase() !== baseRepoFullName.toLowerCase();
+
+      return {
+        headSha: pr.head.sha,
+        headRef: pr.head.ref,
+        baseRef: pr.base.ref,
+        state: pr.state,
+        isFork,
+        headRepoFullName,
+        baseRepoFullName,
+      };
+    } catch (err) {
+      console.warn(`Could not fetch PR #${pullNumber} details:`, err);
+      return null;
+    }
+  }
+
+  async createDocCommit(
+    accessToken: string,
+    owner: string,
+    repo: string,
+    branch: string,
+    parentCommitSha: string,
+    filePath: string,
+    content: string,
+    commitMessage: string
+  ): Promise<{ commitSha: string; commitUrl: string }> {
+    const octokit = this.getOctokit(accessToken);
+
+    // 1. Retrieve parent commit to determine base tree
+    const { data: parentCommit } = await octokit.rest.git.getCommit({
+      owner,
+      repo,
+      commit_sha: parentCommitSha,
+    });
+
+    const baseTreeSha = parentCommit.tree.sha;
+
+    // 2. Create Git Blob
+    const { data: blob } = await octokit.rest.git.createBlob({
+      owner,
+      repo,
+      content,
+      encoding: 'utf-8',
+    });
+
+    // 3. Create Git Tree on top of baseTreeSha
+    const { data: tree } = await octokit.rest.git.createTree({
+      owner,
+      repo,
+      base_tree: baseTreeSha,
+      tree: [
+        {
+          path: filePath,
+          mode: '100644',
+          type: 'blob',
+          sha: blob.sha,
+        },
+      ],
+    });
+
+    // 4. Create Git Commit pointing to parentCommitSha
+    const { data: commit } = await octokit.rest.git.createCommit({
+      owner,
+      repo,
+      message: commitMessage,
+      tree: tree.sha,
+      parents: [parentCommitSha],
+    });
+
+    // 5. Update branch ref without force (fails if branch moved, ensuring safe non-force update)
+    const cleanBranch = branch.replace(/^refs\/heads\//, '');
+    await octokit.rest.git.updateRef({
+      owner,
+      repo,
+      ref: `heads/${cleanBranch}`,
+      sha: commit.sha,
+      force: false,
+    });
+
+    return {
+      commitSha: commit.sha,
+      commitUrl: commit.html_url || `https://github.com/${owner}/${repo}/commit/${commit.sha}`,
+    };
+  }
+
   async commitFileToBranch(
     accessToken: string,
     owner: string,
