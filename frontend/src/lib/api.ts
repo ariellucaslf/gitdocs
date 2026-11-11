@@ -1,4 +1,4 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api';
+const BFF_BASE_URL = '/api/bff';
 
 export interface ApiResponse<T> {
   success: boolean;
@@ -47,12 +47,8 @@ export interface ToggleRepoPayload {
   autoCommitReadme?: boolean;
 }
 
-export async function fetchRepositories(token: string): Promise<RepositoryItem[]> {
-  const res = await fetch(`${API_BASE_URL}/repositories`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
+export async function fetchRepositories(_token?: string): Promise<RepositoryItem[]> {
+  const res = await fetch(`${BFF_BASE_URL}/repositories`, {
     cache: 'no-store',
   });
 
@@ -69,13 +65,14 @@ export async function fetchRepositories(token: string): Promise<RepositoryItem[]
 }
 
 export async function toggleRepository(
-  token: string,
-  payload: ToggleRepoPayload
+  tokenOrPayload: string | ToggleRepoPayload,
+  optionalPayload?: ToggleRepoPayload
 ): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}/repositories/toggle`, {
+  const payload = (typeof tokenOrPayload === 'string' ? optionalPayload : tokenOrPayload) as ToggleRepoPayload;
+
+  const res = await fetch(`${BFF_BASE_URL}/repositories/toggle`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
@@ -91,12 +88,8 @@ export async function toggleRepository(
   }
 }
 
-export async function fetchWebhookLogs(token: string): Promise<WebhookLogItem[]> {
-  const res = await fetch(`${API_BASE_URL}/webhooks/logs`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
+export async function fetchWebhookLogs(_token?: string): Promise<WebhookLogItem[]> {
+  const res = await fetch(`${BFF_BASE_URL}/webhooks/logs`, {
     cache: 'no-store',
   });
 
