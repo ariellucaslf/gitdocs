@@ -2,6 +2,7 @@ import { prisma } from '../config/prisma.js';
 import { githubService } from '../services/github.service.js';
 import { geminiService } from '../services/gemini.service.js';
 import { docProposalService } from '../services/docProposal.service.js';
+import { resolveUserAccessToken } from '../services/crypto.service.js';
 import { formatReviewComment } from '../utils/commentFormatter.js';
 import { queueService } from './queue.service.js';
 
@@ -22,11 +23,11 @@ export class JobProcessorService {
     }, 30000);
 
     try {
-      if (!user || !user.accessToken) {
+      if (!user) {
         throw new Error(`Authentication token missing for repository ID: ${dbRepo?.id}`);
       }
 
-      const accessToken = user.accessToken;
+      const accessToken = resolveUserAccessToken(user);
       const owner = dbRepo.owner;
       const repoName = dbRepo.name;
       const prNumber = run.prNumber;
