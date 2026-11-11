@@ -80,29 +80,13 @@ export class PRProcessorService {
 
       console.log(`💬 [PRProcessor] Comment posted to PR #${prNumber}: ${commentUrl}`);
 
-      // 5. Handle automatic README commit if enabled and structural changes detected
+      // 5. Direct README autocommit is suspended to prevent data loss (ADR 0003).
+      // Suggested documentation updates must go through contextual proposal and human review.
       if (dbRepo.autoCommitReadme && analysis.suggestedReadmeUpdate) {
-        try {
-          const branch = pullRequest.head.ref;
-          const headOwner = pullRequest.head.repo?.owner?.login || owner;
-          const headRepo = pullRequest.head.repo?.name || repoName;
-
-          console.log(`📝 [PRProcessor] Autocommitting suggested README updates to branch '${branch}'...`);
-
-          await githubService.commitFileToBranch(
-            accessToken,
-            headOwner,
-            headRepo,
-            branch,
-            'README.md',
-            analysis.suggestedReadmeUpdate,
-            `docs: auto-update README.md from PR #${prNumber} review [skip ci]`
-          );
-
-          console.log(`✅ [PRProcessor] README.md committed successfully to branch ${branch}`);
-        } catch (commitErr) {
-          console.error(`⚠️ [PRProcessor] Failed to autocommit README.md:`, commitErr);
-        }
+        console.warn(
+          `🛡️ [PRProcessor] Direct README autocommit blocked for PR #${prNumber} (repository: ${repository.full_name}). ` +
+            `Automated writes without human approval are disabled to prevent data loss.`
+        );
       }
 
       // 6. Update WebhookLog to SUCCESS
@@ -126,7 +110,7 @@ export class PRProcessorService {
           status: 'ERROR',
           errorMessage,
         },
-      }).catch((dbErr) => console.error('Failed to update error status on WebhookLog:', dbErr));
+      }).catch((dbErr: unknown) => console.error('Failed to update error status on WebhookLog:', dbErr));
     }
   }
 }

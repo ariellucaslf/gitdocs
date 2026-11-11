@@ -38,26 +38,14 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
 
   const handleToggle = async (
     repo: RepositoryItem,
-    field: 'isActive' | 'autoCommitReadme',
     value: boolean
   ) => {
     try {
       setLoadingRepoId(repo.id);
 
-      const isActivating = field === 'isActive' ? value : repo.isActive;
-      const autoCommit = field === 'autoCommitReadme' ? value : repo.autoCommitReadme;
-
-      // Backend webhook listener public endpoint URL
-      const webhookUrl = `${window.location.origin.replace('3000', '4000')}/api/webhooks`;
-
       await toggleRepository(token, {
         githubRepoId: repo.id,
-        name: repo.name,
-        fullName: repo.fullName,
-        owner: repo.owner,
-        isActive: isActivating,
-        autoCommitReadme: autoCommit,
-        webhookUrl: isActivating ? webhookUrl : undefined,
+        isActive: value,
       });
 
       onRefresh();
@@ -214,7 +202,7 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
 
                     <button
                       disabled={isLoading}
-                      onClick={() => handleToggle(repo, 'isActive', !repo.isActive)}
+                      onClick={() => handleToggle(repo, !repo.isActive)}
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
                         repo.isActive ? 'bg-emerald-500' : 'bg-slate-700'
                       } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
@@ -227,34 +215,22 @@ export function RepositoryList({ repositories, token, onRefresh }: RepositoryLis
                     </button>
                   </div>
 
-                  {/* README Autocommit Toggle */}
+                  {/* README Autocommit Status (Disabled by safety policy) */}
                   {repo.isActive && (
                     <div className="flex items-center justify-between pt-2 border-t border-slate-800/40">
                       <div>
-                        <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-                          <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                        <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-slate-400" />
                           Auto-commit README
                         </span>
-                        <span className="text-[11px] text-slate-400">
-                          Commits suggested docs on PR branch
+                        <span className="text-[11px] text-amber-400/90 block">
+                          Disabled for safety: requires human approval
                         </span>
                       </div>
 
-                      <button
-                        disabled={isLoading}
-                        onClick={() =>
-                          handleToggle(repo, 'autoCommitReadme', !repo.autoCommitReadme)
-                        }
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-                          repo.autoCommitReadme ? 'bg-indigo-500' : 'bg-slate-700'
-                        } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            repo.autoCommitReadme ? 'translate-x-6' : 'translate-x-1'
-                          }`}
-                        />
-                      </button>
+                      <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                        Manual Approval
+                      </span>
                     </div>
                   )}
 
