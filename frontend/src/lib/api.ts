@@ -40,12 +40,11 @@ export interface WebhookLogItem {
 
 export interface ToggleRepoPayload {
   githubRepoId: number;
-  name: string;
-  fullName: string;
-  owner: string;
   isActive: boolean;
-  autoCommitReadme: boolean;
-  webhookUrl?: string;
+  name?: string;
+  fullName?: string;
+  owner?: string;
+  autoCommitReadme?: boolean;
 }
 
 export async function fetchRepositories(token: string): Promise<RepositoryItem[]> {

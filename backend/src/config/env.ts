@@ -3,15 +3,30 @@ import { z } from 'zod';
 
 dotenv.config();
 
-const envSchema = z.object({
-  PORT: z.coerce.number().default(4000),
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
-  GITHUB_CLIENT_ID: z.string().default(''),
-  GITHUB_CLIENT_SECRET: z.string().default(''),
-  GITHUB_WEBHOOK_SECRET: z.string().default(''),
-  GEMINI_API_KEY: z.string().default(''),
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-});
+const envSchema = z
+  .object({
+    PORT: z.coerce.number().default(4000),
+    DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+    GITHUB_CLIENT_ID: z.string().default(''),
+    GITHUB_CLIENT_SECRET: z.string().default(''),
+    GITHUB_WEBHOOK_SECRET: z.string().default(''),
+    GITHUB_WEBHOOK_URL: z.string().default(''),
+    CORS_ORIGIN: z.string().default('http://localhost:3000'),
+    GEMINI_API_KEY: z.string().default(''),
+    NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  })
+  .refine(
+    (data) => {
+      if (data.NODE_ENV === 'production' && data.GITHUB_WEBHOOK_URL) {
+        return data.GITHUB_WEBHOOK_URL.startsWith('https://');
+      }
+      return true;
+    },
+    {
+      message: 'GITHUB_WEBHOOK_URL must use HTTPS in production environments',
+      path: ['GITHUB_WEBHOOK_URL'],
+    }
+  );
 
 const _env = envSchema.safeParse(process.env);
 
