@@ -14,6 +14,7 @@
   "scripts": {
     "dev:backend": "npm --workspace=backend run dev",
     "dev:frontend": "npm --workspace=frontend run dev",
+    "worker": "npm --workspace=backend run worker",
     "build:backend": "npm --workspace=backend run build",
     "build:frontend": "npm --workspace=frontend run build",
     "typecheck": "npm --workspace=backend run typecheck && npm --workspace=frontend run typecheck",
