@@ -8,7 +8,7 @@ on:
 
 jobs:
   validate:
-    name: Build, Lint, Typecheck and Test
+    name: Build, Typecheck and Test
     runs-on: ubuntu-latest
 
     services:
@@ -28,6 +28,10 @@ jobs:
 
     env:
       NODE_ENV: test
+      INTERNAL_AUTH_SECRET: ci-internal-auth-secret-over-32-characters
+      ENCRYPTION_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      TEST_DATABASE_URL: postgresql://gitdocs_user:gitdocs_password@localhost:5432/gitdocs_test?schema=public
+      GEMINI_MODEL: test-model
       DATABASE_URL: postgresql://gitdocs_user:gitdocs_password@localhost:5432/gitdocs_test?schema=public
       GITHUB_WEBHOOK_SECRET: test-ci-secret-value-phrase
       GEMINI_API_KEY: test-ci-gemini-key
@@ -59,6 +63,9 @@ jobs:
 
       - name: Run Unit & HTTP Contract Tests
         run: npm run test
+
+      - name: Run PostgreSQL Integration Tests
+        run: npm run test:integration
 
       - name: Build Backend
         run: npm run build:backend
