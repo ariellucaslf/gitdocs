@@ -107,10 +107,24 @@ describe('Webhook Protection & Content Loss Mitigation (V04, V05, V08)', () => {
       vi.mocked(githubService.getPullRequestDiff).mockResolvedValueOnce('diff --git a/src/app.ts b/src/app.ts');
       vi.mocked(prisma.webhookLog.update).mockResolvedValue({} as any);
 
-      // AI returns a suggested README update
+      // AI returns structured analysis with suggested doc update
       vi.mocked(geminiService.analyzePullRequest).mockResolvedValueOnce({
-        summaryMarkdown: '### AI Review\nLooks good.',
-        suggestedReadmeUpdate: '# Overwritten README content by AI',
+        kind: 'analyzed',
+        data: {
+          schemaVersion: 1,
+          summary: 'Looks good.',
+          categories: ['feat'],
+          findings: [],
+          suggestedDocUpdate: {
+            title: 'Update README',
+            targetFile: 'README.md',
+            description: 'Docs changes',
+            proposedContent: '# Overwritten README content by AI',
+            evidence: 'diff evidence',
+          },
+        },
+        usage: { model: 'test-model', inputTokens: 100, outputTokens: 50 },
+        truncated: false,
       });
 
       vi.mocked(githubService.postPullRequestComment).mockResolvedValueOnce(
