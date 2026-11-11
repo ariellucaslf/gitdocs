@@ -4,15 +4,15 @@ import { Repository } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 import { githubService } from '../services/github.service.js';
 import { sendSuccess, sendError } from '../utils/response.js';
+import { env } from '../config/env.js';
 
 const toggleRepoSchema = z.object({
-  githubRepoId: z.number(),
-  name: z.string(),
-  fullName: z.string(),
-  owner: z.string(),
+  githubRepoId: z.number().int().positive(),
   isActive: z.boolean(),
-  autoCommitReadme: z.boolean().default(false),
-  webhookUrl: z.string().url().optional(),
+  name: z.string().optional(),
+  fullName: z.string().optional(),
+  owner: z.string().optional(),
+  autoCommitReadme: z.boolean().optional(),
 });
 
 export class RepositoryController {
@@ -36,7 +36,10 @@ export class RepositoryController {
           ...repo,
           dbId: tracked?.id ?? null,
           isActive: tracked?.isActive ?? false,
-          autoCommitReadme: tracked?.autoCommitReadme ?? false,
+          desiredActive: tracked?.desiredActive ?? false,
+          provisioningState: tracked?.provisioningState ?? 'DISABLED',
+          lastErrorCode: tracked?.lastErrorCode ?? null,
+          autoCommitReadme: false, // suspended for safety (ADR 0003)
           webhookId: tracked?.webhookId ?? null,
         };
       });
@@ -57,69 +60,169 @@ export class RepositoryController {
 
       const parsed = toggleRepoSchema.safeParse(req.body);
       if (!parsed.success) {
-        sendError(res, `Invalid payload: ${parsed.error.errors.map((e: z.ZodIssue) => e.message).join(', ')}`, 400);
+        sendError(
+          res,
+          `Invalid payload: ${parsed.error.errors.map((e: z.ZodIssue) => e.message).join(', ')}`,
+          400
+        );
         return;
       }
 
-      const { githubRepoId, name, fullName, owner, isActive, autoCommitReadme, webhookUrl } = parsed.data;
+      const { githubRepoId, isActive } = parsed.data;
 
-      let existing = await prisma.repository.findUnique({
+      // 1. Multi-Tenant Authorization Check (A01 / V01)
+      const existing = await prisma.repository.findUnique({
         where: { githubRepoId },
       });
 
-      let webhookId = existing?.webhookId ?? null;
+      if (existing && existing.userId !== req.user.id) {
+        // Must return 404 without leaking resource existence or performing external calls
+        sendError(res, 'Repository not found', 404);
+        return;
+      }
 
-      // Handling Webhook Registration / Removal
-      if (isActive && !webhookId && webhookUrl) {
+      // 2. Fetch canonical repository metadata and verify permissions on GitHub (A01 / V02)
+      let ghRepo;
+      try {
+        ghRepo = await githubService.getRepositoryById(req.user.accessToken, githubRepoId);
+      } catch (ghError) {
+        console.error(`Failed to verify repository ${githubRepoId} on GitHub:`, ghError);
+        sendError(res, 'Repository not found on GitHub or inaccessible', 404);
+        return;
+      }
+
+      // V02: Enforce administrative permissions before modifying webhooks
+      if (!ghRepo.permissions || !ghRepo.permissions.admin) {
+        sendError(
+          res,
+          'Administrative permissions required on the GitHub repository to manage webhooks',
+          403
+        );
+        return;
+      }
+
+      const canonicalName = ghRepo.name;
+      const canonicalFullName = ghRepo.fullName;
+      const canonicalOwner = ghRepo.owner;
+
+      // 3. Activation Flow
+      if (isActive) {
+        const webhookUrl = env.GITHUB_WEBHOOK_URL;
+        if (!webhookUrl) {
+          sendError(res, 'Server configuration error: GITHUB_WEBHOOK_URL is not configured', 500);
+          return;
+        }
+
+        // Reserve intent in database first (PROVISIONING)
+        const reservedRepo = await prisma.repository.upsert({
+          where: { githubRepoId },
+          update: {
+            desiredActive: true,
+            provisioningState: 'PROVISIONING',
+            lastErrorCode: null,
+            name: canonicalName,
+            fullName: canonicalFullName,
+            owner: canonicalOwner,
+          },
+          create: {
+            githubRepoId,
+            name: canonicalName,
+            fullName: canonicalFullName,
+            owner: canonicalOwner,
+            desiredActive: true,
+            isActive: false, // Never mark ACTIVE until webhook is confirmed on GitHub
+            provisioningState: 'PROVISIONING',
+            userId: req.user.id,
+          },
+        });
+
+        // Provision webhook on GitHub
         try {
-          webhookId = await githubService.createRepositoryWebhook(
+          const webhookId = await githubService.createRepositoryWebhook(
             req.user.accessToken,
-            owner,
-            name,
+            canonicalOwner,
+            canonicalName,
             webhookUrl
           );
-        } catch (webhookError) {
-          console.error('⚠️ Could not create webhook on GitHub:', webhookError);
-          // Proceed with database state update
-        }
-      } else if (!isActive && webhookId) {
-        try {
-          await githubService.deleteRepositoryWebhook(
-            req.user.accessToken,
-            owner,
-            name,
-            webhookId
-          );
-          webhookId = null;
-        } catch (webhookError) {
-          console.error('⚠️ Could not remove webhook on GitHub:', webhookError);
-          webhookId = null;
+
+          // Transition to ACTIVE upon confirmation
+          const activeRepo = await prisma.repository.update({
+            where: { id: reservedRepo.id },
+            data: {
+              isActive: true,
+              desiredActive: true,
+              provisioningState: 'ACTIVE',
+              webhookId,
+              lastErrorCode: null,
+            },
+          });
+
+          sendSuccess(res, activeRepo);
+          return;
+        } catch (webhookError: unknown) {
+          console.error(`Failed to provision webhook on GitHub for ${canonicalFullName}:`, webhookError);
+          const errorCode =
+            webhookError instanceof Error ? webhookError.message : 'WEBHOOK_PROVISIONING_FAILED';
+
+          // V06: State transitions to ERROR, retains desiredActive and webhookId if any, but isActive stays false
+          const errorRepo = await prisma.repository.update({
+            where: { id: reservedRepo.id },
+            data: {
+              isActive: false,
+              desiredActive: true,
+              provisioningState: 'ERROR',
+              lastErrorCode: errorCode,
+            },
+          });
+
+          sendSuccess(res, errorRepo);
+          return;
         }
       }
 
-      const savedRepo = await prisma.repository.upsert({
-        where: { githubRepoId },
-        update: {
-          isActive,
-          autoCommitReadme,
-          webhookId,
-          name,
-          fullName,
-          owner,
-        },
-        create: {
-          githubRepoId,
-          name,
-          fullName,
-          owner,
-          isActive,
-          autoCommitReadme,
-          webhookId,
-          userId: req.user.id,
+      // 4. Deactivation Flow
+      if (!existing) {
+        sendError(res, 'Repository is not active or monitored', 404);
+        return;
+      }
+
+      // Pause processing immediately
+      await prisma.repository.update({
+        where: { id: existing.id },
+        data: {
+          desiredActive: false,
+          isActive: false,
         },
       });
 
-      sendSuccess(res, savedRepo);
+      let deletionSucceeded = true;
+      if (existing.webhookId) {
+        try {
+          await githubService.deleteRepositoryWebhook(
+            req.user.accessToken,
+            canonicalOwner,
+            canonicalName,
+            existing.webhookId
+          );
+        } catch (delError: unknown) {
+          console.error(`Failed to delete webhook on GitHub for ${canonicalFullName}:`, delError);
+          deletionSucceeded = false;
+        }
+      }
+
+      // V07: If deletion failed, retain webhookId and mark ERROR so retry/reconciliation is possible
+      const deactivatedRepo = await prisma.repository.update({
+        where: { id: existing.id },
+        data: {
+          isActive: false,
+          desiredActive: false,
+          provisioningState: deletionSucceeded ? 'DISABLED' : 'ERROR',
+          webhookId: deletionSucceeded ? null : existing.webhookId,
+          lastErrorCode: deletionSucceeded ? null : 'WEBHOOK_DELETION_FAILED',
+        },
+      });
+
+      sendSuccess(res, deactivatedRepo);
     } catch (error) {
       console.error('❌ RepositoryController.toggle error:', error);
       sendError(res, 'Failed to update repository settings', 500);

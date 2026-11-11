@@ -22,19 +22,26 @@ export class WebhookController {
 
       const { action, pull_request, repository } = req.body;
 
-      if (!repository || !pull_request) {
+      if (
+        !repository ||
+        !pull_request ||
+        typeof repository.id !== 'number' ||
+        repository.id <= 0 ||
+        typeof pull_request.number !== 'number' ||
+        pull_request.number <= 0
+      ) {
         sendError(res, 'Invalid webhook payload structure', 400);
         return;
       }
 
       console.log(`📥 PR Event received: ${action} on ${repository.full_name} (#${pull_request.number})`);
 
-      // Check if repository is active in our database
+      // Check if repository is active and confirmed in our database
       const dbRepo = await prisma.repository.findUnique({
         where: { githubRepoId: repository.id },
       });
 
-      if (!dbRepo || !dbRepo.isActive) {
+      if (!dbRepo || !dbRepo.isActive || !dbRepo.desiredActive || dbRepo.provisioningState !== 'ACTIVE') {
         console.log(`⏭️ Repository ${repository.full_name} is not monitored or inactive.`);
         sendSuccess(res, { message: 'Repository is inactive, skipped processing' });
         return;
